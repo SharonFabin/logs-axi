@@ -231,6 +231,36 @@ it.each(["traceId", "trace_id", "requestId", "correlationId", "caseId", "runId"]
   expect((await source.query({ ...range, id: "request-a", limit: 1 })).rows).toEqual([]);
 });
 
+it("SigNoz matches the native trace ID when a body trace ID has display precedence", async () => {
+  const native = "4bf92f3577b34da6a3ce929d0e0e4736";
+  const wire = signozWire([row({ traceId: "body-trace", msg: "failed" }, 0, { trace_id: native })]);
+  const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
+  const result = await source.query({ ...range, id: native, limit: 1 });
+  expect(result.rows).toHaveLength(1);
+  expect(result.rows[0]?.traceId).toBe("body-trace");
+});
+
+it("SigNoz matches every original trace representation while retaining level and service filters", async () => {
+  const native = "4bf92f3577b34da6a3ce929d0e0e4736";
+  const body = { traceId: "body-trace", trace_id: "body-snake", level: "error", service: "case", msg: "failed" };
+  const data = { trace_id: native, attributes_string: { traceId: "attribute-trace", trace_id: "attribute-snake" }, resources_string: { "service.name": "case" } };
+  for (const encoded of [true, false]) {
+    const input = [
+      row(body, 0, { ...data, ...(encoded ? {} : { body }) }),
+      row({ ...body, level: "warn", severity: "error" }, 1, data),
+      row({ ...body, service: "other" }, 2, data),
+    ];
+    const wire = signozWire(input);
+    const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
+    for (const id of [native, native.toUpperCase(), "body-trace", "body-snake", "attribute-trace", "attribute-snake"]) {
+      const result = await source.query({ ...range, id, minLevel: "error", service: "case", limit: 10 });
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0]).toMatchObject({ traceId: "body-trace", level: "error", service: "case" });
+    }
+    expect((await source.query({ ...range, id: "unrelated", limit: 10 })).rows).toEqual([]);
+  }
+});
+
 it("SigNoz counts each provider ID once when a late arrival shifts the next offset page", async () => {
   const initial = Array.from({ length: 1000 }, (_, i) => row({ id: "application-id", service: "case", level: i === 999 ? "error" : "warn", severity: "error", msg: "same payload" }, i));
   const tail = row({ id: "application-id", service: "case", level: "warn", severity: "error", msg: "same payload" }, 1000);

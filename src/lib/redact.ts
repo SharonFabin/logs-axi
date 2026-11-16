@@ -96,7 +96,7 @@ const CAP_WORD = String.raw`\p{Lu}[\p{Ll}'’\-]+(?:\p{Lu}[\p{Ll}'’\-]+)*`;
 const UPPER_WORD = String.raw`\p{Lu}{2,}`;
 const COMMA_NAMES = new RegExp(String.raw`\b(?:${CAP_WORD}|${UPPER_WORD}),\s?(?:${CAP_WORD}|${UPPER_WORD})(?:\s\p{Lu}\.?)?(?![\p{L}])`, "gu");
 const PLAIN_VALUE = String.raw`(?!["']?[\w.-]+["']?\s*[:=])(?=[^\s:=#])[^;,{}\[\]()|\r\n"]+?(?=\s*(?:[;,{}\[\]()|\r\n"]|$)|\s+["']?[\w.-]+["']?\s*[:=])`;
-const QUOTED_VALUE = /(["'])((?:\\[\s\S]?|(?<=\p{L})\1(?=\p{L})|(?!\1|\s+["']?[\w.-]+["']?\s*[:=])[^\\;\r\n}])+)\1?/uy;
+const QUOTED_VALUE = /(["'])(?:(?:\\[\s\S]|(?<=\p{L})\1(?=\p{L})|(?!\1)[^\\])*(?!(?<=\p{L})\1(?=\p{L}))\1|(?:\\[\s\S]?|(?<=\p{L})\1(?=\p{L})|(?!\1|\s+["']?[\w.-]+["']?\s*[:=])[^\\;\r\n}])+\1?)/uy;
 const VALUE_SHAPES: Record<ProtectedKind, string> = {
   name: PLAIN_VALUE,
   ssn: String.raw`(?:\d{9}|\d{3}-\d{2}-\d{4})\b`,

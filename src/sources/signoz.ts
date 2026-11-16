@@ -166,6 +166,18 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
   return { ...rec, fields: { ...attrs, ...rec.fields } };
 }
 
+function rowTraceIds(data: Record<string, unknown>): string[] {
+  let body: unknown = data.body;
+  if (typeof body === "string") { try { body = JSON.parse(body); } catch {} }
+  const native = str(data.trace_id);
+  const fields = [body, ...Object.entries(data).filter(([key]) => /^attributes(_|$)/.test(key)).map(([, value]) => value)];
+  return [native && !/^0+$/.test(native) ? native : undefined, ...fields.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const record = value as Record<string, unknown>;
+    return [str(record.traceId), str(record.trace_id)];
+  })].filter((value): value is string => value !== undefined);
+}
+
 class SignozSource implements Source {
   constructor(private request: SignozTransport) {}
 
@@ -187,7 +199,7 @@ class SignozSource implements Source {
           seen.add(id);
         }
         const record = parseRow(row);
-        if (matchesRecord(record, q)) rows.push(record);
+        if (matchesRecord(record, q) || q.id && rowTraceIds(row.data ?? {}).some((traceId) => matchesRecord({ ...record, traceId }, q))) rows.push(record);
         if (rows.length === q.limit) return { rows, partial: false };
       }
       if (page.length < limit) return { rows, partial: false };

@@ -81,6 +81,19 @@ it.each([...PROTECTED_KEYS.name, ...PROTECTED_KEYS.redacted])("consumes escaped 
   }
 });
 
+it.each(Object.values(PROTECTED_KEYS).flat())("consumes internal delimiters in closed quoted %s values", (key) => {
+  for (const quote of ['"', "'"]) for (const separator of [";", "}", ",", "\n", " requestId=", `\\${quote}`]) {
+    const output = maskText(`failed ${key}=${quote}apixaban${separator}metoprolol${quote}; requestId=req-1`);
+    expect(output).not.toMatch(/apixaban|metoprolol/);
+    expect(output).toContain("requestId=req-1");
+  }
+});
+
+it("masks both medications separated by a semicolon inside quotes", () => {
+  expect(maskText('failed medications="apixaban;metoprolol"')).toBe("failed [redacted]");
+  expect(maskText("failed patient: 'O'Brien; requestId=req-1")).toBe("failed patient: '[name]'; requestId=req-1");
+});
+
 it.each(["caseId", "residentId", "requestId", "correlationId", "traceId", "runId"])("preserves operational %s labels in every representation", (key) => {
   expect(isPatientField(key)).toBe(false);
   const json = JSON.stringify({ [key]: "req-1" });
