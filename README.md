@@ -48,6 +48,15 @@ SigNoz has no public port: run `terraform output -raw signoz_ui_command` in
 `infra/aws/environments/<env>` of the monorepo to forward it (dev on 3301, prod on 3302
 in the example).
 
+**Live status (v1):** the CloudWatch adapter is verified read-only against dev and prod.
+The SigNoz adapter is untested against a live server, pending a viewer API key: its
+request and response shapes follow SigNoz's v5 `query_range` contract (as used by the
+official SigNoz MCP server) and are covered by recorded-shape tests only. To try it:
+start the port-forward above, then
+`export SIGNOZ_API_KEY_DEV="$(aws ssm get-parameter --profile Point360-Admin --with-decryption --name /point360/dev/shared/SIGNOZ_VIEWER_KEY --query Parameter.Value --output text)"`
+(prod: the `/point360/prod/...` parameter into `SIGNOZ_API_KEY_PROD`) and run
+`logs-axi signoz dev services`.
+
 ## Commands
 
 | command | what | defaults |
