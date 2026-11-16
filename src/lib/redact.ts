@@ -15,13 +15,13 @@ import type { LogRecord } from "../core/types.js";
 const DROP_EXACT = new Set([
   "name", "names", "fullname", "firstname", "lastname", "middlename", "givenname", "familyname", "surname",
   "displayname", "preferredname", "nickname", "initials",
-  "resident", "residents", "patient", "patients", "prescriber", "prescribers", "physician", "doctor",
+  "resident", "residents", "patient", "patients", "prescriber", "prescribers", "physician", "doctor", "provider",
   "dob", "dateofbirth", "birthdate", "birthday", "age", "gender", "sex",
   "ssn", "socialsecuritynumber", "mrn", "medicalrecordnumber", "chartnumber",
   "phone", "phonenumber", "mobile", "cell", "fax", "email", "emailaddress",
   "address", "street", "streetaddress", "addressline1", "addressline2", "city", "zip", "zipcode", "postalcode",
   "memberid", "membernumber", "subscriberid", "subscribernumber", "policyid", "policynumber", "groupnumber",
-  "medicaidid", "medicareid", "mbi", "beneficiaryid", "insuranceid",
+  "medicaidid", "medicareid", "mbi", "mbiid", "beneficiaryid", "insuranceid",
   "rx", "rxnumber", "rxno", "npi", "dea",
   "drug", "drugs", "drugname", "medication", "medications", "ndc", "sig", "directions", "dose", "dosage",
   "diagnosis", "diagnoses", "icd10", "icd", "allergy", "allergies",
@@ -90,9 +90,10 @@ const CAP_WORD = String.raw`\p{Lu}[\p{Ll}'’\-]+(?:\p{Lu}[\p{Ll}'’\-]+)*`;
 const UPPER_WORD = String.raw`\p{Lu}{2,}`;
 /** Case-insensitive literal without the `i` flag: under `iu`, \p{Lu} would also match lowercase letters. */
 const ci = (w: string) => w.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`);
-const NAME_LABEL = `(?:${["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full ?name", "first ?name", "last ?name", "name"].map(ci).join("|")})`;
+const NAME_LABEL = `(?:${["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full ?name", "first ?name", "last ?name", "name"].map(ci).join("|")})(?![\\p{L}\\p{N}_])`;
 
-const labelledValue = (label: string, value: string) => new RegExp(String.raw`["']?\b(?:${label})["']?\s*[:=#]?\s*(?:"${value}"?|'${value}'?|${value})`, "gi");
+const labelledValue = (label: string, value: string, flags = "gi", quotedValue = value) =>
+  new RegExp(String.raw`(["']?\b(?:${label})["']?)(\s*[:=#]?\s*)(?:(["'])(${quotedValue})\3?|(${value}))`, flags);
 
 const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
   [/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "[email]"],
@@ -112,10 +113,9 @@ const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
   ],
   // resident: Jane Doe / patient="JOHN SMITH" / name=Smith
   [
-    new RegExp(String.raw`\b(${NAME_LABEL})(\s*[:=]\s*|\s+)(["']?)((?:${CAP_WORD}|${UPPER_WORD})(?:[\s,]+(?:${CAP_WORD}|${UPPER_WORD}|\p{Lu}\.))*)\3`, "gu"),
-    (m: string, label: string, sep: string, q: string, name: string) =>
-      // after `:`/`=` the value is a name whatever it says; after a space only if it is not ordinary words
-      /[:=]/.test(sep) || nameUnlessCommon(name) !== name ? `${label}${sep}${q}[name]${q}` : m,
+    labelledValue(NAME_LABEL, String.raw`(?:${CAP_WORD}|${UPPER_WORD})(?:[\s,]+(?:${CAP_WORD}|${UPPER_WORD}|\p{Lu}\.))*|\p{Ll}[\p{Ll}'’\-]*(?:\s+\p{Ll}[\p{Ll}'’\-]*)*`, "gu", String.raw`(?:(?!\3)[^;\r\n}\]])+`),
+    (m: string, label: string, sep: string, q: string | undefined, _quotedName: string | undefined, plainName: string) =>
+      q || /[:=#]/.test(sep) || nameUnlessCommon(plainName) !== plainName ? `${label}${sep}${q ?? ""}[name]${q ?? ""}` : m,
   ],
   // Smith, Jane / SMITH, JANE
   [new RegExp(String.raw`\b(?:${CAP_WORD}|${UPPER_WORD}),\s?(?:${CAP_WORD}|${UPPER_WORD})(?:\s\p{Lu}\.?)?(?![\p{L}])`, "gu"), nameUnlessCommon],
