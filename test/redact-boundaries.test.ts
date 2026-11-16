@@ -163,6 +163,24 @@ it.each(["ssns", "mrns", "memberIds", "names", "medications", "diagnoses", "unkn
   expect(output).toContain('"requestId":"1234567890"');
 });
 
+it("inherits protection before structural and operational child exemptions", () => {
+  expect(maskText('failed {"drugs":{"msg":"apixaban"}')).toBe('failed {"drugs":{"msg":"[redacted]"}');
+  expect(maskText('failed {"ssns":{"requestId":"1234567890","nested":[{"service":"apixaban"},["metoprolol",3]]}')).toBe('failed {"ssns":{"requestId":"[ssn]","nested":[{"service":"[ssn]"},["[ssn]","[ssn]"]]}');
+});
+
+it.each(Object.entries(PROTECTED_KEYS).flatMap(([kind, keys]) => keys.map((key) => [kind, key])))("retains the %s tag under protected %s containers", (kind, key) => {
+  for (const child of ["level", "severity", "severity_text", "service", "service.name", "msg", "message", "time", "timestamp", "requestId", "correlationId", "caseId", "runId", "traceId", "trace_id", "residentId", "patientId", "orgId", "facilityId", "ssn", "unknown"]) {
+    const values = { [child]: "apixaban", nested: [{ [child]: ["metoprolol", 1234567890, true, null, { ssn: "123456789" }] }] };
+    const input = JSON.stringify({ [key]: values, requestId: "outside-id" }).slice(0, -1);
+    const output = maskText(input);
+    expect(output).not.toMatch(/apixaban|metoprolol|1234567890|123456789|\btrue\b|\bnull\b/);
+    expect(output).toContain(`[${kind}]`);
+    expect(output).toContain('"requestId":"outside-id"');
+    const tag = `[${kind}]`;
+    expect(Object.values(JSON.parse(output + "}"))).toEqual([{ [child]: tag, nested: [{ [child]: [tag, tag, tag, tag, { ssn: tag }] }] }, "outside-id"]);
+  }
+});
+
 it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id", "residentId", "patientId", "orgId", "facilityId"])("never applies patient heuristics to approved %s scalars", (key) => {
   for (const spelling of [key, `${key}s`, key.replace(/Id$/, "_id"), `${key.replace(/Id$/, "_id")}s`]) {
     for (const value of ["1234567890", "123-45-6789", "Jane Testperson", 1234567890, null, true]) {

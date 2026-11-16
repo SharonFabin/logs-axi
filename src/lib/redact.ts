@@ -175,13 +175,13 @@ function labelledValues(text: string): string {
 }
 
 function maskFragment(text: string, stats: RedactStats): string {
-  const stack = [{ key: "" }];
+  const stack: (ProtectedKind | undefined)[] = [undefined];
   let key = "";
   return text.replace(/(["'])(?:\\[\s\S]?|(?<=\p{L})\1(?=\p{L})|(?!\1)[^\\])*\1?|[{}\[\],:]|[^{}\[\],:"'\r\n]+/gu, (token, quote: string | undefined, at: number) => {
-    const parent = stack.at(-1)!;
+    const parent = stack.at(-1);
     if (!token.trim() || token === ":") return token;
     if (token === "{" || token === "[") {
-      stack.push({ key: key || parent.key });
+      stack.push(parent ?? patientFieldKind(key));
       key = "";
       return token;
     }
@@ -193,6 +193,7 @@ function maskFragment(text: string, stats: RedactStats): string {
       const masked = maskText(key, stats);
       return masked === key ? token : JSON.stringify(masked);
     }
+    if (parent) return JSON.stringify(`[${parent}]`);
     if (isOperationalId(key)) return token;
     let value = token;
     if (quote) {
@@ -207,7 +208,7 @@ function maskFragment(text: string, stats: RedactStats): string {
       const masked = maskText(value, stats);
       return quote ? JSON.stringify(masked) : masked;
     }
-    const kind = patientFieldKind(key) ?? patientFieldKind(parent.key);
+    const kind = patientFieldKind(key);
     if (quote || kind || !/^(?:true|false|null|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)$/i.test(token.trim())) return JSON.stringify(`[${kind ?? "redacted"}]`);
     return token.replace(/[-+]?\b\d{5,}(?:\.\d+)?(?:e[+-]?\d+)?\b/gi, '"[redacted]"');
   });
