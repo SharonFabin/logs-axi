@@ -18,9 +18,10 @@ export interface SignozEnv {
 
 export type SignozTransport = (path: string, body: unknown) => Promise<unknown>;
 
-export const signoz: SourceFactory = (raw, label, transport) => {
+export const signoz: SourceFactory = (raw, envName, transport) => {
+  const label = `sources.signoz.${envName}`;
   const env = validate(raw, label);
-  return new SignozSource((transport as SignozTransport | undefined) ?? httpTransport(env, label));
+  return new SignozSource((transport as SignozTransport | undefined) ?? httpTransport(env, label, envName));
 };
 
 function validate(raw: Record<string, unknown>, label: string): SignozEnv {
@@ -32,9 +33,7 @@ function validate(raw: Record<string, unknown>, label: string): SignozEnv {
   return raw as unknown as SignozEnv;
 }
 
-function httpTransport(env: SignozEnv, label: string): SignozTransport {
-  // the CLI labels env configs `sources.signoz.<env>`
-  const envName = label.split(".").pop() ?? label;
+function httpTransport(env: SignozEnv, label: string, envName: string): SignozTransport {
   return async (path, body) => {
     const key = signozKey(envName);
     if (!key) throw new AxiError(`no SigNoz API key for ${label}`, { help: ["Run `logs-axi signoz login`"] });

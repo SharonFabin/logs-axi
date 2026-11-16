@@ -137,7 +137,7 @@ async function route(argv: string[], deps: Deps): Promise<string> {
   const range = resolveRange(args.flags, spec.since, now);
   const redact = args.flags.unredacted !== true;
   const ctx: Ctx = {
-    source: SOURCES[source]!(envConfig, `sources.${source}.${env}`, deps.transports?.[source]),
+    source: SOURCES[source]!(envConfig, env, deps.transports?.[source]),
     prefix: `logs-axi ${source} ${env}`,
     range,
     rangeLabel: rangeLabel(range, args.flags, spec.since),
@@ -219,6 +219,7 @@ ${flagLines(LOGIN_FLAGS)}
   // never echo positionals: a pasted key would land in the output
   if (args.positionals.length) throw usageError("signoz login takes no arguments: the key is never passed on the command line", ["Run `logs-axi signoz login` and paste the key at the prompt"]);
   const env = typeof args.flags.env === "string" ? args.flags.env : undefined;
+  if (env === "") throw usageError("--env must not be empty");
   const key = await (deps.readSecret ?? ((p) => readSecret(p)))(`SigNoz viewer API key${env ? ` for ${env}` : ""}: `);
   if (!key) throw usageError("no key entered", ["Run `logs-axi signoz login` and paste the key at the prompt"]);
   if (!validKey(key)) throw usageError("invalid API key: use a single printable ASCII token");

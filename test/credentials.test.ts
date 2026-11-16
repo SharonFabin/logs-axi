@@ -72,6 +72,36 @@ describe("credentials file", () => {
     expect(() => signozKey("dev", sys)).toThrow(/is not valid JSON$/);
     expect(() => signozKey("dev", sys)).not.toThrow(/KEYSECRET/);
   });
+
+  it("rejects an empty scope without replacing the default key", () => {
+    const sys = tempSys();
+    saveSignozKey("default-key", undefined, sys);
+    expect(() => saveSignozKey("replacement-key", "", sys)).toThrow("--env must not be empty");
+    expect(signozKey("dev", sys)).toBe("default-key");
+  });
+
+  it.each(["write", "rename"])("preserves existing credentials when %s fails", (stage) => {
+    const sys = tempSys();
+    const file = saveSignozKey("default-key", undefined, sys);
+    saveSignozKey("prod-key", "prod", sys);
+    const before = fs.readFileSync(file);
+    const failure = new Error("simulated filesystem failure");
+    const operation = stage === "write"
+      ? vi.spyOn(fs, "writeFileSync").mockImplementationOnce((fd) => {
+          fs.writeSync(fd as number, '{"signoz":');
+          throw failure;
+        })
+      : vi.spyOn(fs, "renameSync").mockImplementationOnce(() => { throw failure; });
+    try {
+      expect(() => saveSignozKey("replacement-key", "prod", sys)).toThrow(failure);
+    } finally {
+      operation.mockRestore();
+    }
+    expect(fs.readFileSync(file)).toEqual(before);
+    expect(signozKey("dev", sys)).toBe("default-key");
+    expect(signozKey("prod", sys)).toBe("prod-key");
+    expect(fs.readdirSync(path.dirname(file))).toEqual(["credentials"]);
+  });
 });
 
 describe("logs-axi signoz login", () => {
@@ -95,6 +125,58 @@ describe("logs-axi signoz login", () => {
     expect(res.out).toContain("for: prod");
     expect(signozKey("prod", sys)).toBe(SECRET);
     expect(signozKey("dev", sys)).toBeUndefined();
+  });
+
+  it.each([["--env", ""], ["--env="]])("rejects empty scope %j before prompting", async (...flags) => {
+    const sys = tempSys();
+    const file = saveSignozKey("default-key", undefined, sys);
+    const before = fs.readFileSync(file);
+    const readSecret = vi.fn(async () => SECRET);
+    const res = await run(["signoz", "login", ...flags], { sys, readSecret });
+    expect(res.code).toBe(2);
+    expect(res.out).toContain("--env must not be empty");
+    expect(readSecret).not.toHaveBeenCalled();
+    expect(fs.readFileSync(file)).toEqual(before);
+  });
+
+  it.each([undefined, "prod.eu"])("repairs malformed credentials during login for %s", async (env) => {
+    const sys = tempSys();
+    const file = credentialsPath(sys);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{"signoz":{"default":KEYSECRET');
+    const res = await run(["signoz", "login", ...(env === undefined ? [] : ["--env", env])], { sys, readSecret: async () => SECRET });
+    expect(res.code).toBe(0);
+    expect(res.out).not.toContain("KEYSECRET");
+    expect(res.out).not.toContain(SECRET);
+    expect(signozKey(env ?? "dev", sys)).toBe(SECRET);
+    if (env !== undefined) expect(signozKey("dev", sys)).toBeUndefined();
+    expect(fs.readdirSync(path.dirname(file))).toEqual(["credentials"]);
+  });
+
+  it.each(["tail", "search", "errors", "trace", "services", "fields"])("uses the exact dotted environment's login key for %s", async (command) => {
+    const sys = tempSys();
+    for (const [k, v] of Object.entries(sys.env)) vi.stubEnv(k, v!);
+    vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "");
+    saveSignozKey("default-key", undefined, sys);
+    saveSignozKey("eu-key", "eu", sys);
+    const login = await run(["signoz", "login", "--env", "prod.eu"], { sys, readSecret: async () => SECRET });
+    expect(login.code).toBe(0);
+    const sent: (string | null)[] = [];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      sent.push(new Headers(init?.headers).get("SIGNOZ-API-KEY"));
+      return new Response(JSON.stringify({ status: "success", data: { data: { results: [] } } }));
+    });
+    try {
+      const args = command === "search" ? ["timeout"] : command === "trace" ? ["req-123"] : [];
+      const res = await run(["signoz", "prod.eu", command, ...args], {
+        config: { sources: { signoz: { "prod.eu": { endpoint: "http://localhost:1" } } } }, now: NOW,
+      });
+      expect(res.code).toBe(0);
+      expect(sent).toEqual([SECRET]);
+      expect(login.out + res.out).not.toContain(SECRET);
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   it("notes when the env var will override the stored key", async () => {

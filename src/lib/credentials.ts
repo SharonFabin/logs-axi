@@ -11,6 +11,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { AxiError } from "./errors.js";
 
 export const KEY_ENV = "LOGS_AXI_SIGNOZ_KEY";
@@ -42,7 +43,7 @@ interface CredentialsFile {
   signoz?: { default?: string; envs?: Record<string, string> };
 }
 
-function readFile(sys: Sys): CredentialsFile {
+function readFile(sys: Sys, recover = false): CredentialsFile {
   const file = credentialsPath(sys);
   let text: string;
   try {
@@ -54,6 +55,7 @@ function readFile(sys: Sys): CredentialsFile {
     const parsed = JSON.parse(text);
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
+    if (recover) return {};
     // never quote the parser's message: it can carry part of the key
     throw new AxiError(`credentials file ${file} is not valid JSON`, { help: ["Run `logs-axi signoz login` to rewrite it"] });
   }
@@ -67,23 +69,30 @@ export function signozKey(env: string, sys: Sys = realSys()): string | undefined
 
 /** Store a key for one env, or for every env when `env` is undefined. Returns the file. */
 export function saveSignozKey(key: string, env: string | undefined, sys: Sys = realSys()): string {
+  if (env === "") throw new AxiError("--env must not be empty");
   const file = credentialsPath(sys);
   const dir = paths(sys).dirname(file);
   const posix = sys.platform !== "win32";
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (posix) fs.chmodSync(dir, 0o700);
 
-  const data = readFile(sys);
+  const data = readFile(sys, true);
   const signoz = (data.signoz ??= {});
-  if (env) signoz.envs = { ...signoz.envs, [env]: key };
+  if (env !== undefined) signoz.envs = { ...signoz.envs, [env]: key };
   else signoz.default = key;
 
-  const fd = fs.openSync(file, "w", 0o600);
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  const fd = fs.openSync(temporary, "wx", 0o600);
   try {
-    if (posix) fs.fchmodSync(fd, 0o600); // an existing file keeps its old mode otherwise
-    fs.writeSync(fd, JSON.stringify(data, null, 2) + "\n");
+    try {
+      if (posix) fs.fchmodSync(fd, 0o600);
+      fs.writeFileSync(fd, JSON.stringify(data, null, 2) + "\n");
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(temporary, file);
   } finally {
-    fs.closeSync(fd);
+    fs.rmSync(temporary, { force: true });
   }
   return file;
 }

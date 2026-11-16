@@ -61,7 +61,7 @@ describe("cloudwatch", () => {
   });
 
   it("validates its config", () => {
-    expect(() => cloudwatch({ region: "us-east-1" }, "sources.cloudwatch.dev")).toThrow(/logGroups/);
+    expect(() => cloudwatch({ region: "us-east-1" }, "dev")).toThrow(/logGroups/);
   });
 });
 

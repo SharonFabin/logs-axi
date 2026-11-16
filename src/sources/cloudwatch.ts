@@ -28,8 +28,8 @@ export type CloudWatchTransport = (cmd: StartQueryCommand | GetQueryResultsComma
 const POLL_MS = 500;
 const TIMEOUT_MS = 60_000;
 
-export const cloudwatch: SourceFactory = (raw, label, transport) => {
-  const env = validate(raw, label);
+export const cloudwatch: SourceFactory = (raw, envName, transport) => {
+  const env = validate(raw, `sources.cloudwatch.${envName}`);
   let send = transport as CloudWatchTransport | undefined;
   if (!send) {
     const client = new CloudWatchLogsClient({ region: env.region, ...(env.profile ? { profile: env.profile } : {}) });

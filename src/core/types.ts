@@ -58,4 +58,4 @@ export interface Source {
  * config file, unvalidated: the factory checks the keys it needs. `transport` is the
  * test seam (recorded responses); production passes undefined.
  */
-export type SourceFactory = (env: Record<string, unknown>, label: string, transport?: unknown) => Source;
+export type SourceFactory = (env: Record<string, unknown>, envName: string, transport?: unknown) => Source;
