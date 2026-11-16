@@ -15,18 +15,19 @@ const PERSON_PREFIXES = ["resident", "patient", "prescriber", "physician", "doct
 export const PROTECTED_KEYS = {
   name: ["name", "names", "full name", "first name", "last name", "middle name", "given name", "family name", "surname", "display name", "preferred name", "nickname", "initials", "residents", "patients", "prescribers", "provider", ...PERSON_PREFIXES,
     ...["first", "last", "middle", "full", "given", "family", "sur", "display", "user", "person", "contact", "sender", "recipient", "provider", "prescriber", "resident", "patient", "physician", "doctor", "member", "subscriber", "caregiver", "guardian"].map((stem) => `${stem} name`)],
-  ssn: ["ssn", "social security number"],
+  ssn: ["ssn", "ssn#", "ssn no", "ssn num", "ssn number", "social security number", "social security #", "social security no", "social security num"],
   dob: ["dob", "date of birth", "birth date", "birthday"],
   mrn: ["mrn", "MR#", "medical record", "medical record number", "chart number"],
   rx: ["rx", "rx number", "rx no", "rx num"],
-  id: ["mbi", "npi", "dea", "group number", ...["member", "subscriber", "policy", "medicaid", "medicare", "mbi", "beneficiary", "insurance"].flatMap((stem) => ["id", "number", "no", "num"].map((suffix) => `${stem} ${suffix}`))],
+  id: ["mbi", "npi", "dea", "group number", ...["member", "subscriber", "policy", "medicaid", "medicare", "mbi", "beneficiary", "insurance"].flatMap((stem) => ["id", "#", "number", "no", "num"].map((suffix) => `${stem} ${suffix}`))],
   room: ["room", "room number", "rm", "bed", "bed number"],
   phone: ["phone", "phone number", "mobile", "cell", "fax"],
   email: ["email", "email address"],
   redacted: ["age", "gender", "sex", "address", "street", "street address", "address line 1", "address line 2", "city", "zip", "zip code", "postal code", "drug", "drugs", "drug name", "medication", "medications", "medication name", "ndc", "sig", "directions", "dose", "dosage", "diagnosis", "diagnoses", "icd10", "icd", "allergy", "allergies"],
 };
 type ProtectedKind = keyof typeof PROTECTED_KEYS;
-const normalizeKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9#]/g, "");
+const compactKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9#]/g, "");
+const normalizeKey = (key: string) => compactKey(key).replace(/(?:#|number|num|no)(s?)$/, "number$1");
 const KEY_KINDS = new Map<string, ProtectedKind>(Object.entries(PROTECTED_KEYS).flatMap(([kind, keys]) => keys.map((key) => [singularKey(normalizeKey(key)), kind as ProtectedKind] as [string, ProtectedKind])));
 const NAME_SUFFIXES = [...KEY_KINDS].filter(([key]) => key !== "name" && key.endsWith("name"));
 const PERSON_PREFIX = new RegExp("^(?:" + PERSON_PREFIXES.map(normalizeKey).join("|") + ")");
@@ -112,10 +113,10 @@ const VALUE_SHAPES: Record<ProtectedKind, string> = {
 function labelPattern(kind: ProtectedKind): string {
   const spell = (key: string) => [...key].join(String.raw`[_.\s-]*`);
   const keys = [...new Set(PROTECTED_KEYS[kind].flatMap((key) => {
-    const normalized = normalizeKey(key);
-    const singular = singularKey(normalized);
+    const spelling = compactKey(key);
+    const singular = singularKey(spelling);
     const plural = /[^aeiou]y$/.test(singular) ? singular.slice(0, -1) + "ies" : /(?:s|x|z|ch|sh)$/.test(singular) ? singular + "es" : singular + "s";
-    return [normalized, singular, plural];
+    return [spelling, normalizeKey(key), singular, plural];
   }))].sort((a, b) => b.length - a.length);
   const prefix = PERSON_PREFIXES.map((key) => spell(normalizeKey(key))).join("|");
   const known = keys.map((key) => (key !== "name" && key.endsWith("name") ? String.raw`[\w. -]*` : "") + spell(key)).join("|");

@@ -74,6 +74,9 @@ it.each([
   ['lookup failed first_name J; retry', 'lookup failed first_name [name]; retry'],
   ['request failed {"social_security_number":"123456789"', 'request failed {[ssn]'],
   ['request failed {"patient.social-security-number":"123456789"', 'request failed {[ssn]'],
+  ['request failed {"ssn#":"123456789"}', 'request failed {}'],
+  ['request failed {"ssn#":"123456789"', 'request failed {[ssn]'],
+  ...["member", "subscriber", "policy", "medicaid", "medicare", "mbi", "beneficiary", "insurance"].flatMap((label) => ["#", "no", "num", "number"].map((suffix) => [`failed ${label} ${suffix}${suffix === "#" ? "" : " "}INS12345; retry`, "failed [id]; retry"])),
 ])("masks the reported protected-label fragment %s", (input, expected) => {
   expect(maskText(input)).toBe(expected);
 });
