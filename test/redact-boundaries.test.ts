@@ -22,6 +22,11 @@ describe("labelled identifier value contract", () => {
     it(`masks ${label} ${quote}${value}${quote} as a whole value`, () => {
       expect(maskText(`failed ${label} ${quote}${value}${quote}; retry`)).toBe(`failed ${replacement}; retry`);
     });
+    if (quote) it(`masks ${label} ${quote}${value} without a closing value quote`, () => {
+      for (const suffix of ["", "; requestId=987654321 caseId=case-1"]) {
+        expect(maskText(`failed ${label} ${quote}${value}${suffix}`)).toBe(`failed ${replacement}${suffix}`);
+      }
+    });
   }
 });
 
@@ -45,6 +50,10 @@ it.each([
       expect(output).toContain(replacement);
     }
   }
+  for (const keyQuote of ['"', "'"]) for (const valueQuote of ['"', "'"]) for (const suffix of ["", ',"requestId":"987654321","caseId":"case-1"']) {
+    const prefix = 'request failed {"requestId":"987654321","caseId":"case-1",';
+    expect(maskText(`${prefix}${keyQuote}${key}${keyQuote}:${valueQuote}${value}${suffix}`)).toBe(`${prefix}${replacement}${suffix}`);
+  }
 });
 
 it("runs exact, person-name and prefix rules on normalized singular fields, preserving operational IDs and service names", () => {
@@ -65,11 +74,11 @@ it("runs exact, person-name and prefix rules on normalized singular fields, pres
 });
 
 it.each(["cloudwatch", "signoz"] as const)("%s sanitizes plural names and quoted identifiers before every output consumer", async (source) => {
-  const event = { ...events(1)[0]!, level: "error", msg: 'failed {"mrn":"A12345","ssn":"123456789"', fields: {
+  const event = { ...events(1)[0]!, level: "error", msg: 'failed {"mrn":"A12345","ssn":"123456789', fields: {
     caseId: "case-1", medicationNames: ["apixaban"], providerNames: ["PROTECTEDVALUE"], "ctx:userNames": ["PROTECTEDVALUE"],
-    details: JSON.stringify({ personNames: ["PROTECTEDVALUE"], message: 'failed {"memberId":"MBR12345","social security number":"123456789"' }),
-    error: 'failed {"rxNumber":"123456","ssn":"123456789"', note: 'failed {"bed":"12B","ssn":"123456789"',
-    counts: { 'failed {"ssn":"123456789"': 1 }, requestId: "987654321",
+    details: JSON.stringify({ personNames: ["PROTECTEDVALUE"], message: 'failed {"memberId":"MBR12345","social security number":"123456789' }),
+    error: 'failed {"rxNumber":"123456","ssn":"123456789', note: 'failed {"bed":"12B","ssn":"123456789',
+    counts: { 'failed {"ssn":"123456789': 1 }, requestId: "987654321",
   } };
   const deps = { config: TEST_CONFIG, now: NOW, transports: { [source]: source === "cloudwatch" ? cloudwatchStub([event]) : signozStub([event]) } };
   for (const command of [["tail", "--full"], ["search", "failed", "--full"], ["trace", "case-1", "--full"], ["errors"], ["fields"]]) {
@@ -85,7 +94,7 @@ it.each(["cloudwatch", "signoz"] as const)("%s sanitizes plural names and quoted
 });
 
 it("masks quoted identifiers in AWS SDK diagnostics", async () => {
-  const send = vi.spyOn(CloudWatchLogsClient.prototype, "send").mockRejectedValue(new Error('failed {"mrn":"A12345","ssn":"123456789"'));
+  const send = vi.spyOn(CloudWatchLogsClient.prototype, "send").mockRejectedValue(new Error('failed {"mrn":"A12345","ssn":"123456789'));
   try {
     const source = cloudwatch({ region: "us-east-1", logGroups: ["g"] }, "t");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[mrn]");
@@ -98,7 +107,7 @@ it("masks quoted identifiers in AWS SDK diagnostics", async () => {
 });
 
 it("masks quoted identifiers in SigNoz HTTP and structured error diagnostics", async () => {
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('failed {"memberId":"MBR12345","social security number":"123456789"', { status: 500 }));
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('failed {"memberId":"MBR12345","social security number":"123456789', { status: 500 }));
   vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test");
   try {
     const source = signoz({ endpoint: "http://x" }, "t");
@@ -109,7 +118,7 @@ it("masks quoted identifiers in SigNoz HTTP and structured error diagnostics", a
     vi.unstubAllEnvs();
     fetch.mockRestore();
   }
-  const source = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: 'failed {"rxNumber":"123456","ssn":"123456789"' } }));
+  const source = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: 'failed {"rxNumber":"123456","ssn":"123456789' } }));
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[rx]");
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
