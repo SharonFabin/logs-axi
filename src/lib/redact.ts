@@ -194,9 +194,16 @@ function maskFragment(text: string, stats: RedactStats): string {
       return masked === key ? token : JSON.stringify(masked);
     }
     if (isOperationalId(key)) return token;
+    let value = token;
+    if (quote) {
+      const encoded = quote === '"' ? token : '"' + token.slice(1, token.endsWith(quote) ? -1 : undefined).replace(/\\[\s\S]|"/g, (part) => part === '"' ? '\\"' : part) + '"';
+      try { value = JSON.parse(encoded); }
+      catch {
+        try { value = JSON.parse(encoded + '"'); }
+        catch { return JSON.stringify("[redacted]"); }
+      }
+    }
     if (FRAGMENT_STRUCTURAL.has(normalizeKey(key))) {
-      let value = quote ? token.slice(1, token.endsWith(quote) ? -1 : undefined) : token;
-      if (quote === '"') { try { value = JSON.parse(token); } catch {} }
       const masked = maskText(value, stats);
       return quote ? JSON.stringify(masked) : masked;
     }

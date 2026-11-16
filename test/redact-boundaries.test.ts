@@ -193,6 +193,27 @@ it("redacts the reported message fragment and embedded name-keyed map", () => {
   expect(maskText('failed {"byResident":{"Jane Testperson":3')).toBe('failed {"byResident":{"[name]":3');
 });
 
+it.each(["level", "severity", "severity_text", "service", "service.name", "msg", "message", "time", "timestamp", "details", "ssn"])("decodes escaped %s fragment values before masking", (key) => {
+  for (const escaped of [String.raw`ssn: \"123456789`, String.raw`context\nssn:\t123456789`, String.raw`ssn: \u0031\u0032\u0033\u0034\u0035\u0036\u0037\u0038\u0039`, String.raw`path \\share; ssn: 123456789`]) {
+    for (const quote of ['"', "'"]) for (const closing of [quote, ""]) {
+      const input = `failed {"${key}":${quote}${escaped}${closing}`;
+      const output = maskText(input);
+      expect(output).not.toContain("123456789");
+      expect(output).not.toContain(String.raw`\u0031\u0032\u0033`);
+      expect(output).toMatch(/\[(?:ssn|redacted)\]/);
+    }
+  }
+  for (const invalid of [String.raw`ssn: 123456789\q`, String.raw`ssn: 123456789\u12`, "ssn: 123456789\\"]) {
+    expect(maskText(`failed {"${key}":"${invalid}`)).toBe(`failed {"${key}":"[redacted]"`);
+    const operational = `failed {"requestId":"${invalid}`;
+    expect(maskText(operational)).toBe(operational);
+  }
+});
+
+it("masks the SSN in the reported truncated escaped message", () => {
+  expect(maskText(String.raw`failed {"message":"ssn: \"123456789`)).toBe('failed {"message":"[ssn]"');
+});
+
 it("masks protected-looking map keys in truncated JSON", () => {
   const output = maskText('failed {"byResident":{"Resident Jane Testperson":3');
   expect(output).toContain('"Resident [name]":');
