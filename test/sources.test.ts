@@ -91,6 +91,11 @@ describe("signoz", () => {
     await expect(src.query({ ...range, limit: 1 })).rejects.toThrow("bad filter");
   });
 
+  it("does not echo a failed payload's rows", async () => {
+    const src = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", data: { rows: [{ body: "Jane Testperson" }] } }));
+    await expect(src.query({ ...range, limit: 1 })).rejects.toThrow(/^signoz: "error"$/);
+  });
+
   it("needs an API key before calling out", async () => {
     delete process.env.SIGNOZ_NOPE;
     const src = signoz({ endpoint: "http://127.0.0.1:9", apiKeyEnv: "SIGNOZ_NOPE" }, "sources.signoz.dev");

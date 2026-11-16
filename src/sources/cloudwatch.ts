@@ -12,6 +12,7 @@ import {
   type ResultField,
 } from "@aws-sdk/client-cloudwatch-logs";
 import { AxiError } from "../lib/errors.js";
+import { maskText } from "../lib/redact.js";
 import { isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
 import type { LogQuery, LogRecord, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
@@ -50,7 +51,7 @@ function validate(raw: Record<string, unknown>, label: string): CloudWatchEnv {
 
 function awsError(e: unknown, env: CloudWatchEnv): AxiError {
   const err = e as { name?: string; message?: string };
-  const msg = `cloudwatch: ${err.name ?? "error"}: ${err.message ?? String(e)}`;
+  const msg = `cloudwatch: ${err.name ?? "error"}: ${maskText(err.message ?? String(e))}`;
   if (/credential|token|expired|sso|profile/i.test(msg)) {
     return new AxiError(msg, { help: [`Run \`aws sso login --profile ${env.profile ?? "<profile>"}\` and retry`] });
   }

@@ -4,7 +4,7 @@ import { run } from "../src/cli.js";
 import { FAKE_PEOPLE, NOW, TEST_CONFIG, cloudwatchStub, events, signozStub } from "./fixtures.js";
 
 describe("patient fields", () => {
-  it.each(["residentName", "resident", "patientName", "prescriberName", "firstName", "last_name", "dob", "dateOfBirth", "ssn", "mrn", "phone", "email", "address", "memberId", "rxNumber", "npi", "drugName", "medication", "diagnosis", "room", "patient.dob", "user.email", "residentDob", "senderName"])(
+  it.each(["residentName", "resident", "patientName", "prescriberName", "firstName", "last_name", "dob", "dateOfBirth", "ssn", "mrn", "phone", "email", "address", "memberId", "rxNumber", "npi", "drugName", "medication", "diagnosis", "room", "patient.dob", "user.email", "residentDob", "senderName", "residentMrn", "patientSsn", "patientMedication", "contactPerson"])(
     "drops %s",
     (k) => expect(isPatientField(k)).toBe(true),
   );
@@ -34,6 +34,10 @@ describe("free-text masking", () => {
     ["matched TESTPERSON, JANE Q. today", "matched [name] today"],
     ["Case Created for María Plácido", "Case Created for [name]"],
     ["called Maria Placeholder at 813-555-0142", "called [name] at [phone]"],
+    ["SMS to +15551234567 failed, retry 5551234567 or 1-555-123-4567", "SMS to [phone] failed, retry [phone] or [phone]"],
+    ["Failed to notify Jane McDonald", "Failed to notify [name]"],
+    ["Dr McDonald signed", "Dr [name] signed"],
+    ["resident: DeShawn MacArthur", "resident: [name]"],
     ["mail jane.t@example.com DOB: 01/05/1950", "mail [email] [dob]"],
     ["MRN: A12345 Rx #1234567 member id ABC12345 room 12B ssn 123-45-6789", "[mrn] [rx] [id] [room] ssn [ssn]"],
   ])("%s", (input, expected) => expect(maskText(input)).toBe(expected));
@@ -47,6 +51,10 @@ describe("free-text masking", () => {
     "case created",
     "ECONNREFUSED 10.0.0.12:5432",
   ])("leaves ordinary log text alone: %s", (input) => expect(maskText(input)).toBe(input));
+
+  it("masks names used as map keys", () => {
+    expect(redactObject({ byResident: { "Jane Testperson": 3 } }, { droppedFields: 0 })).toEqual({ byResident: { "[name]": 3 } });
+  });
 
   it("masks the message and string fields of a record", () => {
     const r = redactRecord(

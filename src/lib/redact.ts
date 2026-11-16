@@ -37,7 +37,7 @@ const DROP_EXACT = new Set([
 ]);
 /** A key that starts with a person prefix is dropped unless it is an id or a count (`residentDob` goes, `residentId` stays). */
 const PERSON_PREFIX = /^(resident|patient|prescriber|physician|doctor|member|subscriber|guardian|caregiver|contact|emergencycontact|nextofkin|recipient|sender)/;
-const KEEP_SUFFIX = /(id|ids|count|counts|total|n)$/;
+const KEEP_SUFFIX = /(id|ids|count|counts|total)$/;
 /** Any key ending in `name` with a person-ish stem: `prescriberName`, `senderName`, `userName`. */
 const PERSON_NAME = /(first|last|middle|full|given|family|sur|display|user|person|contact|sender|recipient|provider|prescriber|resident|patient|physician|doctor|member|subscriber|caregiver|guardian|drug|medication)name$/;
 
@@ -85,7 +85,8 @@ const COMMON = new Set(
   ).split(/\s+/),
 );
 
-const CAP_WORD = String.raw`\p{Lu}[\p{Ll}'’\-]+`;
+/** A capitalized word, interior capitals included (`McDonald`, `DeShawn`). */
+const CAP_WORD = String.raw`\p{Lu}[\p{Ll}'’\-]+(?:\p{Lu}[\p{Ll}'’\-]+)*`;
 const UPPER_WORD = String.raw`\p{Lu}{2,}`;
 /** Case-insensitive literal without the `i` flag: under `iu`, \p{Lu} would also match lowercase letters. */
 const ci = (w: string) => w.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`);
@@ -94,7 +95,8 @@ const NAME_LABEL = `(?:${["resident", "patient", "prescriber", "physician", "doc
 const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
   [/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "[email]"],
   [/\b\d{3}-\d{2}-\d{4}\b/g, "[ssn]"],
-  [/(?:\+?1[-.\s]?)?\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]\d{4}\b/g, "[phone]"],
+  [/\+\d{10,15}(?!\d)/g, "[phone]"],
+  [/(?<![\w.])(?:1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?![\w.])/g, "[phone]"],
   [/\b(?:DOB|D\.O\.B\.?|date of birth|birth ?date)\s*[:=#]?\s*\S+(?:\s+\d{1,2},?\s+\d{2,4})?/gi, "[dob]"],
   [/\b(?:MRN|MR#|medical record(?: number)?)(?![A-Za-z])\s*[:=#]?\s*[A-Z0-9-]+/gi, "[mrn]"],
   [/\bRx\s*(?:#|no\.?|num(?:ber)?)?\s*[:=#]?\s*\d[\d-]{3,}\d\b/gi, "[rx]"],
@@ -158,7 +160,8 @@ export function redactObject(obj: Record<string, unknown>, stats: RedactStats): 
       stats.droppedFields++;
       continue;
     }
-    out[k] = STRUCTURAL.has(k) ? v : redactValue(v, stats);
+    // a map keyed by people (`{ byResident: { "Jane Doe": 3 } }`) puts the name in the key
+    out[STRUCTURAL.has(k) ? k : maskText(k)] = STRUCTURAL.has(k) ? v : redactValue(v, stats);
   }
   return out;
 }

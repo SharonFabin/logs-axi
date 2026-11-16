@@ -6,6 +6,7 @@
  * "apiKey" in the config. It is sent as the SIGNOZ-API-KEY header and never printed.
  */
 import { AxiError } from "../lib/errors.js";
+import { maskText } from "../lib/redact.js";
 import { isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
 import type { LogQuery, LogRecord, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
@@ -56,7 +57,7 @@ function httpTransport(env: SignozEnv, label: string): SignozTransport {
     }
     const text = await res.text();
     if (!res.ok) {
-      throw new AxiError(`signoz: HTTP ${res.status}: ${text.slice(0, 300)}`, {
+      throw new AxiError(`signoz: HTTP ${res.status}: ${maskText(text.slice(0, 300))}`, {
         help: res.status === 401 || res.status === 403 ? [`check the key in ${keyVar}`] : [],
       });
     }
@@ -150,7 +151,8 @@ interface V5Result {
 
 function results(payload: unknown): V5Result[] {
   const p = payload as { status?: string; error?: unknown; data?: { data?: { results?: V5Result[] | null } } };
-  if (p?.status && p.status !== "success") throw new AxiError(`signoz: ${JSON.stringify(p.error ?? p).slice(0, 300)}`);
+  // never echo the payload itself: a failed response can still carry rows
+  if (p?.status && p.status !== "success") throw new AxiError(`signoz: ${maskText(JSON.stringify(p.error ?? p.status).slice(0, 300))}`);
   return p?.data?.data?.results ?? [];
 }
 
