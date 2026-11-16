@@ -1,0 +1,30 @@
+{
+  "//": "Copy to ~/.config/logs-axi/config.json (or point LOGS_AXI_CONFIG at it). No secrets here: SigNoz keys come from the env var each apiKeyEnv names.",
+  "sources": {
+    "cloudwatch": {
+      "dev": {
+        "//": "ECS services log to /point360/<env> with stream prefix <service>/ (infra/aws/modules/environment/cluster.tf). Add \"/point360/dev/api-gateway\" for access logs.",
+        "profile": "Point360-Admin",
+        "region": "us-east-1",
+        "logGroups": ["/point360/dev"]
+      },
+      "prod": {
+        "profile": "Point360-Admin",
+        "region": "us-east-1",
+        "logGroups": ["/point360/prod"]
+      }
+    },
+    "signoz": {
+      "dev": {
+        "//": "SigNoz has no public port: forward it first with `terraform output -raw signoz_ui_command` from infra/aws/environments/dev (local port 3301). The viewer key lives in SSM at /point360/dev/shared/SIGNOZ_VIEWER_KEY.",
+        "endpoint": "http://localhost:3301",
+        "apiKeyEnv": "SIGNOZ_API_KEY_DEV"
+      },
+      "prod": {
+        "//": "Same for prod, forwarded to local port 3302 (change localPortNumber in the command) so both can be up at once.",
+        "endpoint": "http://localhost:3302",
+        "apiKeyEnv": "SIGNOZ_API_KEY_PROD"
+      }
+    }
+  }
+}
