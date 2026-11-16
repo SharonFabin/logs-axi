@@ -111,7 +111,7 @@ export function cloudwatchServiceStats(evs: Event[], query: string) {
     const wire = JSON.parse(line(e));
     const selected = insightsFields(query, { ...wire, "@message": line(e), "@logStream": `${e.service}/container/task` });
     if (!selected) continue;
-    const key = `${e.service}\u0000${selected.axiLevel}`;
+    const key = `${selected.svc}\u0000${selected.axiLevel}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return {
@@ -188,14 +188,20 @@ export function signozServiceStats(evs: Event[], specs: any[]) {
   return {
     status: "success",
     data: { type: "scalar", data: { results: specs.map((spec) => {
-      const counts = new Map<string, number>();
+      const counts = new Map<string, { values: unknown[]; count: number }>();
       for (const e of evs) {
-        if (evaluate(spec.filter.expression, signozFields(e))) counts.set(e.service, (counts.get(e.service) ?? 0) + 1);
+        const fields = signozFields(e);
+        if (!evaluate(spec.filter.expression, fields)) continue;
+        const values = spec.groupBy.map((g: any) => evaluate(g.fieldContext === "body" ? g.name : `${g.fieldContext}.${g.name}`, fields) ?? "");
+        const key = JSON.stringify(values);
+        const group = counts.get(key) ?? { values, count: 0 };
+        group.count++;
+        counts.set(key, group);
       }
       return {
         queryName: spec.name,
-        columns: [{ name: "service.name", columnType: "group" }, { name: "n", columnType: "aggregation" }],
-        data: [...counts.entries()],
+        columns: [...spec.groupBy.map((g: any) => ({ name: g.name, columnType: "group" })), { name: "n", columnType: "aggregation" }],
+        data: [...counts.values()].map((group) => [...group.values, group.count]),
       };
     }) } },
   };
@@ -239,12 +245,24 @@ export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], res
 }
 
 function signozFields(e: Event): Record<string, unknown> {
-  return { ...e.fields, "service.name": e.service, body: e.msg, severity_text: e.level.toUpperCase(), trace_id: e.traceId };
+  return { attribute: e.fields, resource: { "service.name": e.service }, log: { body: e.msg, severity_text: e.level.toUpperCase(), trace_id: e.traceId } };
 }
 
 export function signozStub(evs: Event[], rec: Recorder = { requests: [], responses: [] }) {
   return Object.assign(
-    async (_path: string, body: any) => {
+    async (_path: string, body?: any) => {
+      if (body === undefined) {
+        const candidates = [
+          { name: "body.service", fieldContext: "body", expression: "body.service" },
+          { name: "service.name", fieldContext: "resource", expression: "resource.service.name" },
+          { name: "service", fieldContext: "attribute", expression: "attribute.service" },
+        ];
+        const keys: Record<string, unknown[]> = {};
+        for (const { expression, ...field } of candidates) if (evs.some((e) => typeof evaluate(expression, signozFields(e)) === "string")) {
+          (keys[field.name] ??= []).push(field);
+        }
+        return { status: "success", data: { complete: true, keys } };
+      }
       rec.requests.push(body);
       let res: unknown;
       if (body.requestType === "scalar") res = signozServiceStats(evs, body.compositeQuery.queries.map((q: any) => q.spec));

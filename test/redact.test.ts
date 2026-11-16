@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { decode } from "@toon-format/toon";
 import { isPatientField, maskText, redactObject, redactRecord } from "../src/lib/redact.js";
 import { run } from "../src/cli.js";
-import { FAKE_PEOPLE, NOW, TEST_CONFIG, cloudwatchStub, events, signozStub } from "./fixtures.js";
+import { FAKE_PEOPLE, NOW, TEST_CONFIG, cloudwatchResults, cloudwatchStub, events, signozStub } from "./fixtures.js";
 
 describe("patient fields", () => {
   it.each(["residentName", "resident", "patientName", "prescriberName", "firstName", "last_name", "dob", "dateOfBirth", "ssn", "mrn", "phone", "email", "address", "memberId", "rxNumber", "npi", "drugName", "medication", "diagnosis", "room", "patient.dob", "user.email", "residentDob", "senderName", "residentMrn", "patientSsn", "patientMedication", "contactPerson"])(
@@ -68,15 +69,22 @@ describe("free-text masking", () => {
 
 describe("end to end: no fake person reaches the output", () => {
   const evs = events(300);
-  const commands = [["tail", "--limit", "300"], ["search", "failed", "--limit", "300"], ["errors"], ["trace", evs.find((e) => e.fields.residentName)!.traceId!], ["fields"], ["services"]];
+  const traced = evs.find((e) => e.fields.residentName)!;
+  const wire = JSON.parse(cloudwatchResults([traced]).results[0]!.find((field) => field.field === "@message")!.value!);
 
   for (const source of ["cloudwatch", "signoz"] as const) {
+    const id = source === "cloudwatch" ? wire.caseId : traced.traceId!;
+    const commands = [["tail", "--limit", "300"], ["search", "failed", "--limit", "300"], ["errors"], ["trace", id], ["fields"], ["services"]];
     for (const cmd of commands) {
       for (const fmt of [[], ["--json"], ...(["tail", "search", "trace"].includes(cmd[0]!) ? [["--full"]] : [])]) {
         it(`${source} ${cmd[0]} ${fmt.join(" ")}`, async () => {
           const transport = source === "cloudwatch" ? cloudwatchStub(evs) : signozStub(evs);
           const { out, code } = await run([source, "dev", ...cmd, ...fmt], { config: TEST_CONFIG, transports: { [source]: transport }, now: NOW });
           expect(code).toBe(0);
+          if (cmd[0] === "trace") {
+            const body = fmt.includes("--json") ? JSON.parse(out) : decode(out.split("\nhelp[")[0]!);
+            expect(body.lines).toHaveLength(1);
+          }
           for (const p of FAKE_PEOPLE) expect(out).not.toContain(p);
           expect(out).not.toContain("1950-01-05");
           expect(out).not.toContain("813-555-0142");

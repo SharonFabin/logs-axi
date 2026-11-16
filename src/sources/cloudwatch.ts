@@ -68,21 +68,24 @@ const list = (xs: string[]) => "[" + xs.map((x) => JSON.stringify(x)).join(", ")
 /** The Insights query for a LogQuery. Exported for tests. */
 export function buildQuery(q: LogQuery): string {
   const filters: string[] = [];
-  if (q.service) {
-    const names = serviceAliases(q.service);
-    filters.push(`(service in ${list(names)} or @logStream like /^(${names.map(reEscape).join("|")})\\//)`);
-  }
+  if (q.service) filters.push(`svc in ${list(serviceAliases(q.service))}`);
   if (q.minLevel && q.minLevel !== "debug") filters.push(`axiLevel in ${list(levelsAtLeast(q.minLevel))}`);
   if (q.text) filters.push(`@message like /(?i)${reEscape(q.text)}/`);
   if (q.id) filters.push(`@message like ${JSON.stringify(q.id)}`);
   return [
-    "fields @timestamp, @message, @logStream",
+    ...SERVICE_QUERY,
     ...LEVEL_QUERY,
     ...filters.map((f) => `| filter ${f}`),
     "| sort @timestamp desc",
     `| limit ${q.limit}`,
   ].join("\n");
 }
+
+const SERVICE_QUERY = [
+  "fields @timestamp, @message, @logStream",
+  "| parse @logStream /^(?<stream>[^\\/]+)/",
+  '| fields case(isempty(service) = 0, service, isempty(stream) = 0, stream, "-") as svc',
+];
 
 const LEVEL_QUERY = [
   `| fields case(isempty(level) = 0, level, isempty(severity) = 0, severity, severity_text) as axiRawLevel`,
@@ -98,9 +101,9 @@ const LEVEL_QUERY = [
 ];
 
 export const SERVICES_QUERY = [
-  "parse @logStream /^(?<stream>[^\\/]+)/",
+  ...SERVICE_QUERY,
   ...LEVEL_QUERY,
-  "| fields coalesce(service, stream, \"-\") as svc, axiLevel as lvl",
+  "| fields axiLevel as lvl",
   "| stats count(*) as n by svc, lvl",
   "| limit 1000",
 ].join("\n");

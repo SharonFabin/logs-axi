@@ -10,7 +10,7 @@ const range = { start: 1_000_000, end: 2_000_000 };
 describe("cloudwatch", () => {
   it("builds an Insights query from the shared filters", () => {
     const q = buildQuery({ ...range, service: "case", minLevel: "error", text: "pay.er", id: "abc-123", limit: 50 });
-    expect(q).toContain('filter (service in ["case", "case-service"] or @logStream like /^(case|case-service)\\//)');
+    expect(insightsFields(q, { service: "case", level: "error", "@message": "pay.er abc-123", "@logStream": "other/container/task" })!.svc).toBe("case");
     expect(insightsFields(q, { service: "case", level: "critical", "@message": "pay.er abc-123" })).toBeDefined();
     expect(insightsFields(q, { service: "case", level: "info", "@message": "pay.er abc-123" })).toBeUndefined();
     expect(q).toContain("@message like /(?i)pay\\.er/");
@@ -70,8 +70,11 @@ describe("signoz", () => {
     const filter = buildFilter({ ...range, service: "case-service", minLevel: "warn", limit: 1 });
     expect(evaluate(filter, { "service.name": "case", severity_text: "WARNING" })).toBe(true);
     expect(evaluate(filter, { "service.name": "case", severity_text: "NOTICE" })).toBe(false);
-    expect(buildFilter({ ...range, id: "4BF92F3577B34DA6A3CE929D0E0E4736", limit: 1 })).toBe("trace_id = '4bf92f3577b34da6a3ce929d0e0e4736'");
-    expect(buildFilter({ ...range, id: "req-1", limit: 1 })).toBe("(requestId = 'req-1' OR correlationId = 'req-1' OR caseId = 'req-1' OR runId = 'req-1')");
+    const trace = buildFilter({ ...range, id: "4BF92F3577B34DA6A3CE929D0E0E4736", limit: 1 });
+    expect(evaluate(trace, { log: { trace_id: "4bf92f3577b34da6a3ce929d0e0e4736" } })).toBe(true);
+    const request = buildFilter({ ...range, id: "req-1", limit: 1 });
+    expect(evaluate(request, { attribute: { requestId: "req-1" } })).toBe(true);
+    expect(evaluate(request, { attribute: { residentId: "req-1" } })).toBe(false);
   });
 
   it("parses a raw row: body, severity, resource service, attributes, trace id", () => {

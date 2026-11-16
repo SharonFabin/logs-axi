@@ -7,7 +7,7 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { maskText } from "../lib/redact.js";
-import { INFERRED_LEVELS, LEVEL_ALIASES, isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
+import { INFERRED_LEVELS, LEVEL_ALIASES, isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import { LEVELS, type Level, type LogQuery, type LogRecord, type ServiceCount, type Source, type SourceFactory, type TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
@@ -16,8 +16,7 @@ export interface SignozEnv {
   apiKeyEnv?: string;
 }
 
-/** POST a JSON body to a path, return the parsed JSON. Tests replace it with recorded responses. */
-export type SignozTransport = (path: string, body: unknown) => Promise<unknown>;
+export type SignozTransport = (path: string, body?: unknown) => Promise<unknown>;
 
 export const signoz: SourceFactory = (raw, label, transport) => {
   const env = validate(raw, label);
@@ -42,20 +41,22 @@ function httpTransport(env: SignozEnv, label: string): SignozTransport {
         help: [`export ${keyVar}=<viewer key> (or set "apiKey" in the config) and retry`],
       });
     }
+    if (typeof key !== "string" || !/^[\x21-\x7e]+$/.test(key)) throw new AxiError("signoz: invalid API key; use a single printable ASCII token");
     let res: Response;
+    let text: string;
     try {
       res = await fetch(env.endpoint.replace(/\/$/, "") + path, {
-        method: "POST",
+        method: body === undefined ? "GET" : "POST",
         headers: { "content-type": "application/json", "SIGNOZ-API-KEY": key },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(60_000),
       });
-    } catch (e) {
-      throw new AxiError(`signoz: cannot reach ${env.endpoint}: ${(e as Error).cause ?? (e as Error).message}`, {
+      text = await res.text();
+    } catch {
+      throw new AxiError("signoz: request failed; check the endpoint and connection", {
         help: ["is the SSM port-forward up? `terraform output signoz_ui_command` in infra/aws/environments/<env> prints it"],
       });
     }
-    const text = await res.text();
     if (!res.ok) {
       throw new AxiError(`signoz: HTTP ${res.status}: ${maskText(text).slice(0, 300)}`, {
         help: res.status === 401 || res.status === 403 ? [`check the key in ${keyVar}`] : [],
@@ -73,10 +74,15 @@ function httpTransport(env: SignozEnv, label: string): SignozTransport {
 const lit = (s: string, like = false) =>
   "'" + (like ? s.replace(/[\\%_]/g, "\\$&") : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
 
-/** Ids the house logger binds as attributes; a non-trace id is looked up in these. */
-const ID_ATTRIBUTES = ["requestId", "correlationId", "caseId", "runId"];
+const ID_FIELDS = ["traceId", "trace_id", "requestId", "correlationId", "caseId", "runId"];
 
-const LEVEL_FIELDS = ["body.level", "body.severity", "body.severity_text", "level", "severity", "severity_text"];
+const LEVEL_FIELDS = ["body.level", "body.severity", "body.severity_text", "attribute.level", "attribute.severity", "attribute.severity_text", "log.severity_text"];
+const SERVICE_FIELDS = [
+  { name: "body.service", fieldContext: "body" },
+  { name: "service.name", fieldContext: "resource" },
+  { name: "service", fieldContext: "attribute" },
+];
+const SERVICE_FILTER_FIELDS = ["body.service", "resource.service.name", "attribute.service"];
 const missing = (field: string) => `(${field} NOT EXISTS OR ${field} = '')`;
 const all = (parts: string[]) => "(" + parts.join(" AND ") + ")";
 const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
@@ -89,7 +95,7 @@ function levelFilter(level: Level): string {
   ]));
   const inferred = INFERRED_LEVELS.findIndex(([value]) => value === level);
   if (inferred >= 0) {
-    const messages = ["body.msg", "body.message", "body"];
+    const messages = ["body.msg", "body.message", "log.body"];
     explicit.push(all([
       ...LEVEL_FIELDS.map(missing),
       any(messages.map((field, i) => all([
@@ -105,17 +111,21 @@ function levelFilter(level: Level): string {
 /** The v5 filter expression for a LogQuery. Exported for tests. */
 export function buildFilter(q: LogQuery): string {
   const parts: string[] = [];
-  if (q.service) parts.push(`service.name IN (${serviceAliases(q.service).map((s) => lit(s)).join(", ")})`);
+  if (q.service) parts.push(any([
+    ...SERVICE_FILTER_FIELDS.map((field, i) => all([
+      ...SERVICE_FILTER_FIELDS.slice(0, i).map(missing),
+      `${field} IN (${serviceAliases(q.service!).map((s) => lit(s)).join(", ")})`,
+    ])),
+    ...(q.service === "-" ? [all(SERVICE_FILTER_FIELDS.map(missing))] : []),
+  ]));
   if (q.minLevel && q.minLevel !== "debug") {
     parts.push(any(levelsAtLeast(q.minLevel).map(levelFilter)));
   }
-  if (q.text) parts.push(`body CONTAINS ${lit(q.text, true)}`);
+  if (q.text) parts.push(`log.body CONTAINS ${lit(q.text, true)}`);
   if (q.id) {
-    parts.push(
-      /^[0-9a-f]{32}$/i.test(q.id)
-        ? `trace_id = ${lit(q.id.toLowerCase())}`
-        : "(" + ID_ATTRIBUTES.map((a) => `${a} = ${lit(q.id!)}`).join(" OR ") + ")",
-    );
+    const matches = ID_FIELDS.flatMap((field) => ["body", "attribute"].map((context) => `${context}.${field} = ${lit(q.id!)}`));
+    if (/^[0-9a-f]{32}$/i.test(q.id)) matches.push(`log.trace_id = ${lit(q.id.toLowerCase())}`);
+    parts.push(any(matches));
   }
   return parts.join(" AND ");
 }
@@ -147,7 +157,7 @@ export function rawRequest(q: LogQuery): unknown {
   };
 }
 
-export function servicesRequest(range: TimeRange): unknown {
+export function servicesRequest(range: TimeRange, serviceFields = SERVICE_FIELDS): unknown {
   return {
     schemaVersion: "v1",
     start: range.start,
@@ -161,7 +171,7 @@ export function servicesRequest(range: TimeRange): unknown {
           signal: "logs",
           filter: { expression: level === "unknown" ? `NOT ${any(LEVELS.map(levelFilter))}` : levelFilter(level as Level) },
           aggregations: [{ expression: "count()", alias: "n" }],
-          groupBy: [{ name: "service.name", fieldContext: "resource" }],
+          groupBy: serviceFields,
           limit: 1000,
         },
       })),
@@ -198,7 +208,7 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
   const body = typeof d.body === "string" ? d.body : JSON.stringify(d.body ?? "");
   const rec = parseLine(body, {
     time: isoTime(row.timestamp ?? d.timestamp) ?? "",
-    service: String(resources["service.name"] ?? attrs.service ?? "-"),
+    service: str(resources["service.name"]) ?? str(attrs.service) ?? "-",
     level: [attrs.level, attrs.severity, attrs.severity_text, d.severity_text].find((v): v is string => typeof v === "string" && v !== ""),
     ...(traceId ? { traceId } : {}),
   });
@@ -211,24 +221,31 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
 }
 
 class SignozSource implements Source {
-  constructor(private post: SignozTransport) {}
+  constructor(private request: SignozTransport) {}
 
   async query(q: LogQuery): Promise<LogRecord[]> {
     if (q.service && !SAFE_TOKEN.test(q.service)) throw new AxiError(`invalid service name \`${q.service}\``, { exitCode: 2 });
     if (q.id && !SAFE_TOKEN.test(q.id)) throw new AxiError(`invalid id \`${q.id}\``, { exitCode: 2 });
-    return results(await this.post("/api/v5/query_range", rawRequest(q))).flatMap((r) => (r.rows ?? []).map(parseRow));
+    return results(await this.request("/api/v5/query_range", rawRequest(q))).flatMap((r) => (r.rows ?? []).map(parseRow));
   }
 
   async serviceCounts(range: TimeRange): Promise<ServiceCount[]> {
     const out: ServiceCount[] = [];
-    for (const r of results(await this.post("/api/v5/query_range", servicesRequest(range)))) {
+    const metadata = await this.request("/api/v1/fields/keys?signal=logs&searchText=service&fieldDataType=string&limit=1000") as {
+      status?: string;
+      data?: { complete?: boolean; keys?: Record<string, { name: string; fieldContext: string }[]> };
+    };
+    if (metadata.status !== "success" || metadata.data?.complete !== true) throw new AxiError("signoz: service field metadata is incomplete");
+    const keys = Object.values(metadata.data.keys ?? {}).flat();
+    const serviceFields = SERVICE_FIELDS.filter((field) => keys.some((key) => key.name === field.name && key.fieldContext === field.fieldContext));
+    for (const r of results(await this.request("/api/v5/query_range", servicesRequest(range, serviceFields)))) {
       const cols = r.columns ?? [];
       const at = (name: string) => cols.findIndex((c) => c.name === name);
-      const svc = at("service.name");
+      const serviceColumns = SERVICE_FIELDS.map((field) => at(field.name));
       const n = cols.findIndex((c) => c.columnType === "aggregation");
       for (const row of r.data ?? []) {
         out.push({
-          service: String(row[svc] ?? "-"),
+          service: serviceColumns.map((i) => str(row[i])).find((value) => value !== undefined) ?? "-",
           level: r.queryName === "unknown" ? "-" : normalizeLevel(r.queryName),
           count: Number(row[n] ?? 0),
         });

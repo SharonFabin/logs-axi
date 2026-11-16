@@ -44,10 +44,15 @@ const PERSON_NAME = /(first|last|middle|full|given|family|sur|display|user|perso
 /** Fields that are structure, not content: never masked. */
 const STRUCTURAL = new Set(["service", "level", "time", "traceId", "spanId", "requestId", "correlationId"]);
 
+const isProtectedKey = (key: string): boolean => DROP_EXACT.has(key)
+  || (key.endsWith("s") && DROP_EXACT.has(key.slice(0, -1)))
+  || (key.endsWith("es") && DROP_EXACT.has(key.slice(0, -2)))
+  || (key.endsWith("ies") && DROP_EXACT.has(key.slice(0, -3) + "y"));
+
 export function isPatientField(key: string): boolean {
-  const k = key.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/ids$/, "id");
-  if (DROP_EXACT.has(k)) return true;
-  if (PERSON_PREFIX.test(k) && DROP_EXACT.has(k.replace(PERSON_PREFIX, ""))) return true;
+  const k = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (isProtectedKey(k)) return true;
+  if (PERSON_PREFIX.test(k) && isProtectedKey(k.replace(PERSON_PREFIX, ""))) return true;
   if (PERSON_NAME.test(k)) return true;
   if (PERSON_PREFIX.test(k) && !KEEP_SUFFIX.test(k)) return true;
   // dotted OTel-style keys: judge the last segment too (`user.email`), but a bare `name` there

@@ -29,20 +29,39 @@ function tokens(text: string): Token[] {
   return out;
 }
 
+class ContextValues {
+  constructor(readonly values: unknown[]) {}
+}
+
 export function evaluate(expression: string, fields: Record<string, unknown>): any {
   const input = tokens(expression);
   let at = 0;
   const is = (word: string) => String(input[at]?.value).toLowerCase() === word;
   const take = (word: string) => { if (!is(word)) throw new Error(`expected ${word} at ${input[at]?.value}`); at++; };
-  const lookup = (key: string) => {
+  const read = (value: any, key: string): any => {
+    if (value && Object.hasOwn(value, key)) return value[key];
+    for (const part of key.split(".")) value = value?.[part];
+    return value;
+  };
+  const lookup = (key: string): any => {
     if (Object.hasOwn(fields, key)) return fields[key];
     const [root, ...path] = key.split(".");
-    let value: any = fields[root!];
-    if (root === "body" && path.length && typeof value === "string") {
-      try { value = JSON.parse(value); } catch { return undefined; }
+    if (root === "body" && path.length) {
+      let value: any = (fields.log as any)?.body ?? fields.body;
+      if (typeof value === "string") {
+        try { value = JSON.parse(value); } catch { return undefined; }
+      }
+      return read(value, path.join("."));
     }
-    for (const part of path) value = value?.[part];
-    return value;
+    if (["attribute", "resource", "log"].includes(root!) && path.length) {
+      return read(fields[root!] ?? (fields.log || fields.attribute || fields.resource ? {} : fields), path.join("."));
+    }
+    const resource = read(fields.resource, key);
+    const attribute = read(fields.attribute, key);
+    if (resource !== undefined && attribute !== undefined) return resource;
+    const values = [resource, attribute, read(fields.log, key)].filter((value) => value !== undefined);
+    if (values.length > 1) return new ContextValues(values);
+    return values[0];
   };
   const primary = (): any => {
     if (is("not")) { at++; return !primary(); }
@@ -79,28 +98,30 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     let negated = false;
     if (is("not")) { at++; negated = true; }
     const op = String(input[at]?.value).toLowerCase();
-    let value: boolean;
-    if (op === "exists") { at++; value = left !== undefined && left !== null; }
-    else if (op === "in") {
+    const apply = (test: (value: any) => boolean) => {
+      const values = left instanceof ContextValues ? left.values : [left];
+      return values.some((value) => negated ? !test(value) : test(value));
+    };
+    if (op === "exists") { at++; return apply((value) => value !== undefined && value !== null); }
+    if (op === "in") {
       at++;
       const close = is("[") ? "]" : ")";
       at++;
       const choices: any[] = [];
       while (!is(close)) { choices.push(primary()); if (!is(",")) break; at++; }
       take(close);
-      value = choices.includes(left);
-    } else if (["=", "like", "regexp", "contains"].includes(op)) {
+      return apply((value) => choices.includes(value));
+    }
+    if (["=", "like", "regexp", "contains"].includes(op)) {
       at++;
       const right = primary();
-      value = op === "=" ? left === right : op === "contains" ? String(left ?? "").includes(right)
-        : right instanceof RegExp ? right.test(String(left ?? ""))
-        : op === "regexp" ? new RegExp(right.replace("(?i)", ""), right.includes("(?i)") ? "i" : "").test(String(left ?? ""))
-        : String(left ?? "").includes(right);
-    } else {
-      if (negated) throw new Error("unconsumed NOT");
-      return left;
+      return apply((value) => op === "=" ? value === right : op === "contains" ? String(value ?? "").includes(right)
+        : right instanceof RegExp ? right.test(String(value ?? ""))
+        : op === "regexp" ? new RegExp(right.replace("(?i)", ""), right.includes("(?i)") ? "i" : "").test(String(value ?? ""))
+        : String(value ?? "").includes(right));
     }
-    return negated ? !value : value;
+    if (negated) throw new Error("unconsumed NOT");
+    return left;
   };
   const and = (): any => { let value = compare(); while (is("and")) { at++; const right = compare(); value = value && right; } return value; };
   const or = (): any => { let value = and(); while (is("or")) { at++; const right = and(); value = value || right; } return value; };
@@ -112,6 +133,8 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
 export function insightsFields(query: string, fields: Record<string, unknown>): Record<string, unknown> | undefined {
   const out = { ...fields };
   for (const line of query.split("\n")) {
+    const parse = /^\| parse (@\w+) \/(.*)\/$/.exec(line);
+    if (parse) Object.assign(out, new RegExp(parse[2]!).exec(String(out[parse[1]!] ?? ""))?.groups);
     if (line.startsWith("| fields ")) {
       const assignment = /^\| fields (.*) as (\w+)$/.exec(line);
       if (assignment && !assignment[1]!.includes(" as ")) out[assignment[2]!] = evaluate(assignment[1]!, out);

@@ -86,7 +86,7 @@ function inferLevel(text: string): string | undefined {
   return INFERRED_LEVELS.find(([, pattern]) => new RegExp(pattern, "i").test(text))?.[0];
 }
 
-function str(v: unknown): string | undefined {
+export function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
 }
 
