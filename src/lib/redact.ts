@@ -34,7 +34,7 @@ const DROP_EXACT = new Set([
   "drug", "drugs", "drugname", "medication", "medications", "ndc", "sig", "directions", "dose", "dosage",
   "diagnosis", "diagnoses", "icd10", "icd", "allergy", "allergies",
   "room", "roomnumber", "bed", "bednumber",
-]);
+].map(singularKey));
 /** A key that starts with a person prefix is dropped unless it is an id or a count (`residentDob` goes, `residentId` stays). */
 const PERSON_PREFIX = /^(resident|patient|prescriber|physician|doctor|member|subscriber|guardian|caregiver|contact|emergencycontact|nextofkin|recipient|sender)/;
 const KEEP_SUFFIX = /(id|ids|count|counts|total)$/;
@@ -44,22 +44,24 @@ const PERSON_NAME = /(first|last|middle|full|given|family|sur|display|user|perso
 /** Fields that are structure, not content: never masked. */
 const STRUCTURAL = new Set(["service", "level", "time", "traceId", "spanId", "requestId", "correlationId"]);
 
-const isProtectedKey = (key: string): boolean => DROP_EXACT.has(key)
-  || (key.endsWith("s") && DROP_EXACT.has(key.slice(0, -1)))
-  || (key.endsWith("es") && DROP_EXACT.has(key.slice(0, -2)))
-  || (key.endsWith("ies") && DROP_EXACT.has(key.slice(0, -3) + "y"));
+function singularKey(key: string): string {
+  if (key.endsWith("ies")) return key.slice(0, -3) + "y";
+  if (/(?:sses|xes|zes|ches|shes)$/.test(key)) return key.slice(0, -2);
+  if (/s$/.test(key) && !/(?:ss|sis|us)$/.test(key)) return key.slice(0, -1);
+  return key;
+}
 
 export function isPatientField(key: string): boolean {
-  const k = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (isProtectedKey(k)) return true;
-  if (PERSON_PREFIX.test(k) && isProtectedKey(k.replace(PERSON_PREFIX, ""))) return true;
-  if (PERSON_NAME.test(k)) return true;
-  if (PERSON_PREFIX.test(k) && !KEEP_SUFFIX.test(k)) return true;
-  // dotted OTel-style keys: judge the last segment too (`user.email`), but a bare `name` there
-  // belongs to its parent (`service.name` stays, `patient.name` went above as `patientname`)
-  const last = key.split(/[.\/]/).pop() ?? key;
-  if (last !== key && !/^names?$/i.test(last)) return isPatientField(last);
-  return false;
+  const parts = key.split(/[.\/:]+/).filter(Boolean).map((part) => singularKey(part.toLowerCase().replace(/[^a-z0-9]/g, "")));
+  const last = parts.at(-1) ?? "";
+  const k = parts.join("");
+  const protectedKey = (value: string) => {
+    if (DROP_EXACT.has(value) || PERSON_NAME.test(value)) return true;
+    if (!PERSON_PREFIX.test(value)) return false;
+    if (DROP_EXACT.has(value.replace(PERSON_PREFIX, ""))) return true;
+    return !KEEP_SUFFIX.test(value);
+  };
+  return protectedKey(k) || (last !== "name" && protectedKey(last));
 }
 
 /** Capitalized words common in log messages; a run made only of these is not a name. */
@@ -98,19 +100,18 @@ const UPPER_WORD = String.raw`\p{Lu}{2,}`;
 const ci = (w: string) => w.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`);
 const NAME_LABEL = `(?:${["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full ?name", "first ?name", "last ?name", "name"].map(ci).join("|")})`;
 
+const labelledValue = (label: string, value: string) => new RegExp(String.raw`\b(?:${label})\s*[:=#]?\s*(?:"${value}"|'${value}'|${value})`, "gi");
+
 const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
   [/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "[email]"],
   [/\b\d{3}-\d{2}-\d{4}\b/g, "[ssn]"],
   [/\+\d{10,15}(?!\d)/g, "[phone]"],
   [/(?<![\w.])(?:1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?![\w.])/g, "[phone]"],
-  [/\b(?:DOB|D\.O\.B\.?|date of birth|birth ?date)\s*[:=#]?\s*\S+(?:\s+\d{1,2},?\s+\d{2,4})?/gi, "[dob]"],
-  [/\b(?:MRN|MR#|medical record(?: number)?)(?![A-Za-z])\s*[:=#]?\s*[A-Z0-9-]+/gi, "[mrn]"],
-  [/\bRx\s*(?:#|no\.?|num(?:ber)?)?\s*[:=#]?\s*\d[\d-]{3,}\d\b/gi, "[rx]"],
-  [
-    /\b(?:member|subscriber|policy|medicaid|medicare|mbi|beneficiary|insurance)\s*(?:id|#|no\.?|num(?:ber)?)\s*[:=#]?\s*[A-Z0-9][A-Z0-9-]{3,}/gi,
-    "[id]",
-  ],
-  [/\b(?:room|rm\.?|bed)\s*#?\s*\d+[A-Z]?\b/gi, "[room]"],
+  [labelledValue(String.raw`DOB|D\.O\.B\.?|date of birth|birth ?date`, String.raw`[^\s"';,]+(?:\s+\d{1,2},?\s+\d{2,4})?`), "[dob]"],
+  [labelledValue(String.raw`MRN(?![A-Za-z])|MR#|medical record(?: number)?(?![A-Za-z])`, String.raw`[A-Z0-9-]+`), "[mrn]"],
+  [labelledValue(String.raw`Rx\s*(?:#|no\.?|num(?:ber)?)?`, String.raw`\d[\d-]{3,}\d\b`), "[rx]"],
+  [labelledValue(String.raw`(?:member|subscriber|policy|medicaid|medicare|mbi|beneficiary|insurance)\s*(?:id|#|no\.?|num(?:ber)?)`, String.raw`[A-Z0-9][A-Z0-9-]{3,}`), "[id]"],
+  [labelledValue(String.raw`room|rm\.?|bed`, String.raw`\d+[A-Z]?\b`), "[room]"],
   // Dr Smith, Mrs. Jane Doe, NP Jones
   [
     new RegExp(String.raw`\b(Dr|Doctor|Mr|Mrs|Ms|Miss|Mx|Prof|Nurse|NP|RN|LPN|PA)\.?\s+${CAP_WORD}(?:\s+${CAP_WORD})?`, "gu"),
