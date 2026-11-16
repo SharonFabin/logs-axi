@@ -90,7 +90,7 @@ const CAP_WORD = String.raw`\p{Lu}[\p{Ll}'’\-]+(?:\p{Lu}[\p{Ll}'’\-]+)*`;
 const UPPER_WORD = String.raw`\p{Lu}{2,}`;
 /** Case-insensitive literal without the `i` flag: under `iu`, \p{Lu} would also match lowercase letters. */
 const ci = (w: string) => w.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`);
-const NAME_LABEL = `(?:${["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full ?name", "first ?name", "last ?name", "name"].map(ci).join("|")})(?![\\p{L}\\p{N}_])`;
+const NAME_LABEL = `(?:${["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full ?name", "first ?name", "last ?name", "name"].map(ci).join("|")})(?=["']?(?:\\s*[:=#]|\\s+))`;
 
 const labelledValue = (label: string, value: string, flags = "gi", quotedValue = value) =>
   new RegExp(String.raw`(["']?\b(?:${label})["']?)(\s*[:=#]?\s*)(?:(["'])(${quotedValue})\3?|(${value}))`, flags);
@@ -106,19 +106,19 @@ const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
   [labelledValue(String.raw`Rx\s*(?:#|no\.?|num(?:ber)?)?`, String.raw`\d[\d-]{3,}\d\b`), "[rx]"],
   [labelledValue(String.raw`(?:member|subscriber|policy|medicaid|medicare|mbi|beneficiary|insurance)\s*(?:id|#|no\.?|num(?:ber)?)`, String.raw`[A-Z0-9][A-Z0-9-]{3,}`), "[id]"],
   [labelledValue(String.raw`room|rm\.?|bed`, String.raw`\d+[A-Z]?\b`), "[room]"],
+  // Smith, Jane / SMITH, JANE
+  [new RegExp(String.raw`\b(?:${CAP_WORD}|${UPPER_WORD}),\s?(?:${CAP_WORD}|${UPPER_WORD})(?:\s\p{Lu}\.?)?(?![\p{L}])`, "gu"), nameUnlessCommon],
+  // resident: Jane Doe / patient="JOHN SMITH" / name=Smith
+  [
+    labelledValue(NAME_LABEL, String.raw`(?=\S)[^;,{}\[\]()|\r\n"]+?(?=\s*(?:[;,{}\[\]()|\r\n"]|$)|\s+["']?[\w.-]+["']?\s*[:=])`, "gu", String.raw`(?:(?<=\p{L})\3(?=\p{L})|(?!\3|\s+["']?[\w.-]+["']?\s*[:=])[^;\r\n}])+`),
+    (m: string, label: string, sep: string, q: string | undefined, _quotedName: string | undefined, plainName: string) =>
+      q || /[:=#]/.test(sep) || nameUnlessCommon(plainName) !== plainName ? `${label}${sep}${q ?? ""}[name]${q ?? ""}` : m,
+  ],
   // Dr Smith, Mrs. Jane Doe, NP Jones
   [
     new RegExp(String.raw`\b(Dr|Doctor|Mr|Mrs|Ms|Miss|Mx|Prof|Nurse|NP|RN|LPN|PA)\.?\s+${CAP_WORD}(?:\s+${CAP_WORD})?`, "gu"),
     (_m: string, title: string) => `${title} [name]`,
   ],
-  // resident: Jane Doe / patient="JOHN SMITH" / name=Smith
-  [
-    labelledValue(NAME_LABEL, String.raw`(?:${CAP_WORD}|${UPPER_WORD})(?:[\s,]+(?:${CAP_WORD}|${UPPER_WORD}|\p{Lu}\.))*|\p{Ll}[\p{Ll}'’\-]*(?:\s+\p{Ll}[\p{Ll}'’\-]*)*`, "gu", String.raw`(?:(?!\3)[^;\r\n}\]])+`),
-    (m: string, label: string, sep: string, q: string | undefined, _quotedName: string | undefined, plainName: string) =>
-      q || /[:=#]/.test(sep) || nameUnlessCommon(plainName) !== plainName ? `${label}${sep}${q ?? ""}[name]${q ?? ""}` : m,
-  ],
-  // Smith, Jane / SMITH, JANE
-  [new RegExp(String.raw`\b(?:${CAP_WORD}|${UPPER_WORD}),\s?(?:${CAP_WORD}|${UPPER_WORD})(?:\s\p{Lu}\.?)?(?![\p{L}])`, "gu"), nameUnlessCommon],
   // Jane Doe, Jane Q. Doe, JANE DOE
   [
     new RegExp(String.raw`\b(?:${CAP_WORD}|${UPPER_WORD})(?:\s+\p{Lu}\.)?(?:\s+(?:${CAP_WORD}|${UPPER_WORD})){1,2}(?![\p{L}])`, "gu"),

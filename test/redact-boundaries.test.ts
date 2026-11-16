@@ -31,7 +31,8 @@ describe("labelled identifier value contract", () => {
 });
 
 it.each([
-  ...["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full name", "fullname", "first name", "firstname", "last name", "lastname", "name"].map((label) => [label, "Jane", "[name]"]),
+  ...["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full name", "fullname", "first name", "firstname", "last name", "lastname", "name"].flatMap((label) =>
+    ["Jane", "jane", "Jane de Silva", "Jan van Rossum", "O'Brien", "J Smith", "Dr Jane de Silva", "Smith, Jane"].map((name) => [label, name, "[name]"])),
   ["ssn", "123456789", "[ssn]"], ["social security number", "123456789", "[ssn]"],
   ["dob", "1950-01-05", "[dob]"], ["birthdate", "1950-01-05", "[dob]"],
   ["mrn", "A12345", "[mrn]"], ["medical record number", "A12345", "[mrn]"],
@@ -52,13 +53,16 @@ it.each([
   for (const fragment of fragments) {
     const output = maskText(fragment);
     expect(output).not.toContain(value);
+    if (replacement === "[name]") for (const token of value.match(/\p{L}+/gu) ?? []) {
+      expect(output.match(/\p{L}+/gu) ?? []).not.toContain(token);
+    }
     expect(output).toContain('"requestId":"987654321"');
     expect(output).toContain('"caseId":"case-1"');
     if (!fragment.endsWith("}")) expect(output).toContain(replacement);
   }
-  if (replacement === "[name]") for (const name of ["jane", "Jane de Silva", "O'Brien", "Smith, Jane"]) {
-    for (const close of ['"', ""]) {
-      expect(maskText(`lookup failed {${ids},"${label}":"${name}${close}`)).not.toContain(name);
+  if (replacement === "[name]") {
+    for (const suffix of ["; retry", ", retry", "} retry", "] retry", ") retry", "| retry", "\nretry", " requestId=req-2", " requestId: req-2", ' "requestId": "req-2"', " 'caseId'=case-2"]) {
+      expect(maskText(`${label}: ${value}${suffix}`)).toBe(`${label}: [name]${suffix}`);
     }
   }
 });
@@ -107,17 +111,17 @@ it("runs exact, person-name and prefix rules on normalized singular fields, pres
 });
 
 it.each(["cloudwatch", "signoz"] as const)("%s sanitizes plural names and quoted identifiers before every output consumer", async (source) => {
-  const event = { ...events(1)[0]!, level: "error", msg: 'failed {"patient":"Jane","mrn":"A12345","ssn":"123456789', fields: {
+  const event = { ...events(1)[0]!, level: "error", msg: 'failed patient: Jane de Silva; {"mrn":"A12345","ssn":"123456789', fields: {
     caseId: "case-1", medicationNames: ["apixaban"], providerNames: ["PROTECTEDVALUE"], "ctx:userNames": ["PROTECTEDVALUE"],
     details: JSON.stringify({ personNames: ["PROTECTEDVALUE"], message: 'failed {"memberId":"MBR12345","social security number":"123456789","provider":"Jane' }),
-    error: 'failed {"rxNumber":"123456","ssn":"123456789","sender":"Jane', note: 'failed {"bed":"12B","ssn":"123456789","recipient":"Jane',
-    counts: { 'failed {"ssn":"123456789","caregiver":"Jane': 1 }, requestId: "987654321",
+    error: 'failed sender=J Smith; {"rxNumber":"123456","ssn":"123456789', note: 'failed {"bed":"12B","ssn":"123456789","recipient":"Jane',
+    counts: { 'failed caregiver: Jan van Rossum; {"ssn":"123456789': 1 }, requestId: "987654321",
   } };
   const deps = { config: TEST_CONFIG, now: NOW, transports: { [source]: source === "cloudwatch" ? cloudwatchStub([event]) : signozStub([event]) } };
   for (const command of [["tail", "--full"], ["search", "failed", "--full"], ["trace", "case-1", "--full"], ["errors"], ["fields"]]) {
     const result = await run([source, "dev", ...command, "--json"], deps);
     expect(result.code).toBe(0);
-    expect(result.out).not.toMatch(/A12345|MBR12345|123456|12B|PROTECTEDVALUE|apixaban|Jane/);
+    expect(result.out).not.toMatch(/A12345|MBR12345|123456|12B|PROTECTEDVALUE|apixaban|Jane|\bde\b|Silva|\bJ\b|Smith|Jan|\bvan\b|Rossum/);
     const output = JSON.parse(result.out);
     if (output.lines !== undefined || output.fields !== undefined) expect(result.out).toContain("987654321");
     if (output.lines !== undefined) expect(output.lines).toHaveLength(1);
@@ -127,35 +131,35 @@ it.each(["cloudwatch", "signoz"] as const)("%s sanitizes plural names and quoted
 });
 
 it("masks quoted identifiers in AWS SDK diagnostics", async () => {
-  const send = vi.spyOn(CloudWatchLogsClient.prototype, "send").mockRejectedValue(new Error('failed {"mrn":"A12345","ssn":"123456789","patient":"Jane'));
+  const send = vi.spyOn(CloudWatchLogsClient.prototype, "send").mockRejectedValue(new Error('failed {"mrn":"A12345","ssn":"123456789","patient":Jane de Silva'));
   try {
     const source = cloudwatch({ region: "us-east-1", logGroups: ["g"] }, "t");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[mrn]");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("A12345");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
-    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("Jane");
+    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow(/Jane|\bde\b|Silva/);
   } finally {
     send.mockRestore();
   }
 });
 
 it("masks quoted identifiers in SigNoz HTTP and structured error diagnostics", async () => {
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('failed {"memberId":"MBR12345","social security number":"123456789","patient":"Jane', { status: 500 }));
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('failed {"memberId":"MBR12345","social security number":"123456789","patient":J Smith', { status: 500 }));
   vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test");
   try {
     const source = signoz({ endpoint: "http://x" }, "t");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[id]");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
-    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("Jane");
+    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow(/\bJ\b|Smith/);
   } finally {
     vi.unstubAllEnvs();
     fetch.mockRestore();
   }
-  const source = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: 'failed {"rxNumber":"123456","ssn":"123456789","patient":"Jane' } }));
+  const source = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: 'failed {"rxNumber":"123456","ssn":"123456789","patient":Jan van Rossum' } }));
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[rx]");
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
-  await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("Jane");
+  await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow(/Jan|\bvan\b|Rossum/);
 });

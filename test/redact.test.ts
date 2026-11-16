@@ -27,7 +27,7 @@ describe("patient fields", () => {
 
 describe("free-text masking", () => {
   it.each([
-    ["Resident Jane Testperson not found in roster", "Resident [name] not found in roster"],
+    ["Resident Jane Testperson not found in roster", "Resident [name]"],
     ["resident: Jane Testperson", "resident: [name]"],
     ['patient="JANE TESTPERSON" mismatch', 'patient="[name]" mismatch'],
     ["Dr. Alan Fakename signed", "Dr [name] signed"],
@@ -51,6 +51,7 @@ describe("free-text masking", () => {
     "Patient Not Found",
     "case created",
     "request 123456789 caseId=987654321",
+    "caseId=case-1 residentId=resident-1 patientId=patient-1",
     "ECONNREFUSED 10.0.0.12:5432",
   ])("leaves ordinary log text alone: %s", (input) => expect(maskText(input)).toBe(input));
 
@@ -64,7 +65,7 @@ describe("free-text masking", () => {
       { droppedFields: 0 },
     );
     expect(r.msg).toBe("match failed for [name]");
-    expect(r.fields).toEqual({ error: "Resident [name] missing", n: 3 });
+    expect(r.fields).toEqual({ error: "Resident [name]", n: 3 });
   });
 });
 
