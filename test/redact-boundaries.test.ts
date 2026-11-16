@@ -126,7 +126,6 @@ it.each([
     const output = maskText(`${prefix}${keyQuote}${key}${keyQuote}:${valueQuote}${value}${suffix}`);
     expect(output).not.toContain(value);
     expect(output).toContain(replacement);
-    expect(output).toContain(`${keyQuote}${key}${keyQuote}:`);
     expect(output).toContain('"requestId":"987654321"');
     expect(output).toContain('"caseId":"case-1"');
   }
@@ -179,6 +178,13 @@ it("redacts the reported message fragment and embedded name-keyed map", () => {
   expect(maskText('failed {"message":"ssn: 123456789"')).toBe('failed {"message":"[ssn]"');
   expect(maskText('failed {"byResident":{"Jane Testperson":3}} retry')).toBe('failed {"byResident":{"[name]":3}} retry');
   expect(maskText('failed {"byResident":{"Jane Testperson":3')).toBe('failed {"byResident":{"[name]":3');
+});
+
+it("masks protected-looking map keys in truncated JSON", () => {
+  const output = maskText('failed {"byResident":{"Resident Jane Testperson":3');
+  expect(output).toContain('"Resident [name]":');
+  expect(output).not.toMatch(/Jane|Testperson/);
+  expect(maskText('failed {"ssn":"123456789","patientName":"Jane Testperson","requestId":"1234567890"')).toBe('failed {"ssn":"[ssn]","patientName":"[name]","requestId":"1234567890"');
 });
 
 it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id", "residentId", "patientId", "orgId", "facilityId", "caseIds", "resident_ids"])("recursively redacts containers owned by %s", (key) => {

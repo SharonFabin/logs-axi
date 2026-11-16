@@ -190,7 +190,7 @@ function maskFragment(text: string, stats: RedactStats): string {
     if (/^\s*:/.test(text.slice(at + token.length))) {
       key = quote ? token.slice(1, token.endsWith(quote) ? -1 : undefined) : token.trim();
       if (quote === '"') { try { key = JSON.parse(token); } catch {} }
-      const masked = isPatientField(key) || isOperationalId(key) ? key : maskText(key, stats);
+      const masked = maskText(key, stats);
       return masked === key ? token : JSON.stringify(masked);
     }
     if (isOperationalId(key)) return token;
