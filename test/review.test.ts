@@ -103,13 +103,13 @@ it("CloudWatch trace follows only IDs in the serialized @message contract", asyn
   }
 });
 
-it("sanitizes complete provider JSON before truncating errors", async () => {
+it("omits provider payloads from structured errors", async () => {
   const error = { details: JSON.stringify({ mrn: "SECRET", medication: "apixaban" }), padding: "x".repeat(400) };
   const src = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error }));
   await expect(src.query({ ...range, limit: 1 })).rejects.not.toThrow(/SECRET|apixaban/);
 });
 
-it("redacts JSON HTTP failures before slicing the response body", async () => {
+it("omits provider bodies from HTTP failures", async () => {
   const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ mrn: "SECRET", padding: "x".repeat(400), medication: "apixaban" }), { status: 500 }));
   vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test");
   try {

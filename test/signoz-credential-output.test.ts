@@ -47,8 +47,8 @@ it("keeps the active key out of HTTP and structured SigNoz error output", async 
       expect(code).toBe(1);
       expect(output).not.toContain(key);
       expect(output).not.toContain("123456789");
-      if (structured) expect(output).toMatch(/\[(?:api-key|redacted|ssn)\]/);
-      else expect(output).toContain("logs-axi signoz login");
+      expect(output).toContain("query failed");
+      if (!structured) expect(output).toContain("logs-axi signoz login");
     }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
@@ -56,13 +56,14 @@ it("keeps the active key out of HTTP and structured SigNoz error output", async 
   }
 }, 30_000);
 
-it.each(["sekret123", String.raw`hidden"sekret\987`])("removes decoded and escaped credentials from every SigNoz error format", async (key) => {
+it.each(["sekret123", 'ab"cd', String.raw`hidden"sekret\987`])("omits encoded provider diagnostics from every SigNoz error format", async (key) => {
   vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", key);
   const escaped = [...key].map((char) => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0")).join("");
   try {
-    for (const status of [401, 403, 500, 200]) for (const format of [[], ["--json"]]) {
-      const details = { message: `provider-only-marker rejected ${key}; ssn: 123456789`, requestId: key, nested: [{ [key]: key }] };
-      const body = JSON.stringify(status === 200 ? { status: "error", error: details } : details).replaceAll(JSON.stringify(key).slice(1, -1), escaped);
+    for (const status of [401, 403, 500, 200]) for (const format of [[], ["--json"]]) for (const nested of [false, true]) {
+      const details = { message: `provider-only-marker rejected ${key}; ssn: 123456789`, requestId: key, nested: [{ [key]: key }], details: JSON.stringify({ requestId: key }) };
+      const diagnostic = nested ? { details: JSON.stringify(details) } : details;
+      const body = JSON.stringify(status === 200 ? { status: "error", error: diagnostic } : diagnostic).replaceAll(JSON.stringify(key).slice(1, -1), escaped);
       const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(body, { status }));
       try {
         const result = await run(["signoz", "dev", "tail", ...format], { config: { sources: { signoz: { dev: { endpoint: "http://signoz.test" } } } } });
@@ -71,10 +72,32 @@ it.each(["sekret123", String.raw`hidden"sekret\987`])("removes decoded and escap
         expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ "SIGNOZ-API-KEY": key });
         for (const secret of [key, JSON.stringify(key).slice(1, -1), escaped, "hidden", "sekret123", "987"]) expect(result.out).not.toContain(secret);
         expect(result.out).not.toContain("123456789");
+        expect(result.out).not.toContain("provider-only-marker");
+        expect(result.out).not.toContain("requestId");
         if (status === 401 || status === 403) {
           expect(result.out).toContain("logs-axi signoz login");
-          expect(result.out).not.toContain("provider-only-marker");
         }
+      } finally { fetch.mockRestore(); }
+    }
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it.each(["code", "type"])("retains only a short, credential-free SigNoz error %s", async (field) => {
+  const key = "sekret123";
+  vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", key);
+  try {
+    for (const status of [400, 200]) for (const code of ["invalid_query", `invalid_${key}`, "unsafe code", "x".repeat(65)]) {
+      const error = { [field]: code, message: "provider-only-marker" };
+      const body = JSON.stringify(status === 200 ? { status: "error", error } : error);
+      const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(body, { status }));
+      try {
+        const result = await run(["signoz", "dev", "tail", "--json"], { config: { sources: { signoz: { dev: { endpoint: "http://signoz.test" } } } } });
+        expect(result.code).toBe(1);
+        expect(result.out).toContain(status === 400 ? "HTTP 400" : "signoz: error");
+        expect(result.out).not.toContain("provider-only-marker");
+        if (code === "invalid_query") expect(result.out).toContain(code);
+        else expect(result.out).not.toContain(code);
+        expect(result.out).not.toContain(key);
       } finally { fetch.mockRestore(); }
     }
   } finally { vi.unstubAllEnvs(); }

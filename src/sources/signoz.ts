@@ -8,7 +8,6 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { signozKey, validKey } from "../lib/credentials.js";
-import { maskText } from "../lib/redact.js";
 import { ID_FIELDS, INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
@@ -33,16 +32,13 @@ function validate(raw: Record<string, unknown>, label: string): SignozEnv {
   return raw as unknown as SignozEnv;
 }
 
-function diagnostic(value: unknown, key: string): string {
-  if (typeof value === "string") { try { value = JSON.parse(value); } catch {} }
-  const scrub = (item: unknown): unknown => {
-    if (typeof item === "string") return item.replaceAll(key, "[api-key]");
-    if (Array.isArray(item)) return item.map(scrub);
-    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([name, entry]) => [name.replaceAll(key, "[api-key]"), scrub(entry)]));
-    return item;
-  };
-  const cleaned = scrub(value);
-  return maskText(typeof cleaned === "string" ? cleaned : JSON.stringify(cleaned) ?? "").replaceAll(key, "[api-key]").slice(0, 300);
+function providerError(status: number | "error", payload?: unknown, key?: string): AxiError {
+  const details = payload as { code?: unknown; type?: unknown; error?: { code?: unknown; type?: unknown } } | undefined;
+  const auth = status === 401 || status === 403;
+  const code = !auth && key && [details?.error?.code, details?.error?.type, details?.code, details?.type].find((value): value is string => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value) && !value.includes(key));
+  return new AxiError(`signoz: ${status === "error" ? status : `HTTP ${status}`}: query failed${code ? ` (${code})` : ""}`, {
+    help: [auth ? "Check your viewer key with `logs-axi signoz login`" : "Check the SigNoz endpoint configuration and query filters"],
+  });
 }
 
 function httpTransport(env: SignozEnv, label: string, envName: string): SignozTransport {
@@ -66,8 +62,9 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
       });
     }
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) throw new AxiError(`signoz: HTTP ${res.status}: check your viewer key with \`logs-axi signoz login\``);
-      throw new AxiError(`signoz: HTTP ${res.status}: ${diagnostic(text, key)}`);
+      let error: unknown;
+      try { error = JSON.parse(text); } catch {}
+      throw providerError(res.status, error, key);
     }
     let payload;
     try {
@@ -76,7 +73,7 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
       throw new AxiError("signoz: response is not valid JSON");
     }
     if (payload?.status && payload.status !== "success") {
-      throw new AxiError(`signoz: ${diagnostic(payload.error ?? payload.status, key)}`);
+      throw providerError("error", payload, key);
     }
     return payload;
   };
@@ -145,7 +142,7 @@ interface V5Result {
 function results(payload: unknown): V5Result[] {
   const p = payload as { status?: string; error?: unknown; data?: { data?: { results?: V5Result[] | null } } };
   // never echo the payload itself: a failed response can still carry rows
-  if (p?.status && p.status !== "success") throw new AxiError(`signoz: ${maskText(JSON.stringify(p.error ?? p.status)).slice(0, 300)}`);
+  if (p?.status && p.status !== "success") throw providerError("error");
   return p?.data?.data?.results ?? [];
 }
 

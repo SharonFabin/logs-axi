@@ -310,13 +310,12 @@ it("masks quoted identifiers in AWS SDK diagnostics", async () => {
   }
 });
 
-it("masks quoted identifiers in SigNoz HTTP and structured error diagnostics", async () => {
+it("omits provider details in SigNoz HTTP and structured errors", async () => {
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('failed {"memberId":"MBR12345","social security number":"123456789","patient":J Smith', { status: 500 }));
   vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test");
   try {
     const source = signoz({ endpoint: "http://x" }, "t");
-    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[id]");
-    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
+    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("HTTP 500: query failed");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow(/\bJ\b|Smith/);
   } finally {
@@ -324,8 +323,7 @@ it("masks quoted identifiers in SigNoz HTTP and structured error diagnostics", a
     fetch.mockRestore();
   }
   const source = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: 'failed {"rxNumber":"123456","ssn":"123456789","patient":Jan van Rossum' } }));
-  await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[rx]");
-  await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
+  await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("signoz: error: query failed");
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow(/Jan|\bvan\b|Rossum/);
 });

@@ -92,12 +92,12 @@ describe("signoz", () => {
 
   it("surfaces an API error", async () => {
     const src = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: "bad filter" } }));
-    await expect(src.query({ ...range, limit: 1 })).rejects.toThrow("bad filter");
+    await expect(src.query({ ...range, limit: 1 })).rejects.toThrow("signoz: error: query failed");
   });
 
   it("does not echo a failed payload's rows", async () => {
     const src = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", data: { rows: [{ body: "Jane Testperson" }] } }));
-    await expect(src.query({ ...range, limit: 1 })).rejects.toThrow(/^signoz: "error"$/);
+    await expect(src.query({ ...range, limit: 1 })).rejects.toThrow(/^signoz: error: query failed$/);
   });
 
 
