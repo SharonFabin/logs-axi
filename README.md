@@ -73,6 +73,11 @@ also matches `case-service`), `--level <lvl>` (that level and above), `--limit <
 `--full` (messages over 200 chars and values over 80 are cut with `…[+N]` otherwise),
 `--json`, `--unredacted`. `logs-axi <source> <env>` alone runs `errors`.
 
+Queries scan at most 10,000 candidate rows, with service counts calculated from normalized rows.
+When coverage may be incomplete, output includes `partial: true` and a warning that counts are
+lower bounds. Narrow `--since` to improve coverage. Redacted search hints use a placeholder
+for the search text.
+
 Exit codes: 0 success (empty results included), 1 error, 2 usage error. Errors print to
 stdout as `error:` plus help lines that say how to fix them.
 

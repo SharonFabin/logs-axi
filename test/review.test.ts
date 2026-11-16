@@ -4,8 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/lib/config.js";
 import { run } from "../src/cli.js";
 import { maskText, redactObject } from "../src/lib/redact.js";
-import { buildQuery, SERVICES_QUERY, parseRow as cwRow } from "../src/sources/cloudwatch.js";
-import { buildFilter, servicesRequest, signoz, parseRow as szRow } from "../src/sources/signoz.js";
+import { buildQuery, parseRow as cwRow } from "../src/sources/cloudwatch.js";
+import { buildFilter, signoz, parseRow as szRow } from "../src/sources/signoz.js";
+import { matchesRecord } from "../src/core/normalize.js";
 import { evaluate, insightsFields } from "./query-contract.js";
 import { NOW, TEST_CONFIG, cloudwatchResults, cloudwatchStub, events, signozStub } from "./fixtures.js";
 
@@ -122,8 +123,7 @@ it("enforces AWS's documented maximum of ten case branches in emitted query expr
   const branches = Array.from({ length: 10 }, (_, i) => `${i} = 0, "value-${i}"`);
   expect(evaluate(`case(${branches.join(", ")}, "default")`, {})).toBe("value-0");
   expect(() => evaluate(`case(${[...branches, '11 = 0, "eleventh"'].join(", ")}, "default")`, {})).toThrow("at most 10 branches");
-  expect(insightsFields(buildQuery({ ...range, limit: 10 }), { level: "critical", "@message": "ordinary" })!.axiLevel).toBe("fatal");
-  expect(insightsFields(SERVICES_QUERY, { level: "critical", "@message": "ordinary" })!.axiLevel).toBe("fatal");
+  expect(insightsFields(buildQuery({ ...range, limit: 10 }), { level: "critical", "@message": "ordinary" })).toBeDefined();
 });
 
 it("omits V8 parser input excerpts from config errors in commands and the home view", async () => {
@@ -159,7 +159,7 @@ it("omits V8 parser input excerpts from malformed successful SigNoz responses", 
     expect(result.out).toContain("response is not valid JSON");
     expect(result.out).not.toContain("MRNSECRET");
     fetch.mockImplementation(async () => new Response(JSON.stringify({ status: "success", data: { data: { results: [] } } }), { status: 200 }));
-    expect(await src.query({ ...range, limit: 1 })).toEqual([]);
+    expect(await src.query({ ...range, limit: 1 })).toEqual({ rows: [], partial: false });
     expect((await run(["signoz", "dev", "tail"], { config, now: NOW })).code).toBe(0);
   } finally {
     fetch.mockRestore();
@@ -180,14 +180,13 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
       const szFields = { body, severity_text: "INFO" };
       expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
       expect(szRow({ data: { body, severity_text: "INFO" } }).level).toBe(expected);
-      expect(insightsFields(SERVICES_QUERY, cwFields)!.axiLevel).toBe(expected);
-      const serviceQueries = (servicesRequest(range) as any).compositeQuery.queries;
-      expect(serviceQueries.filter((q: any) => evaluate(q.spec.filter.expression, szFields)).map((q: any) => q.spec.name)).toEqual([expected]);
       for (const minLevel of levels) {
         const selected = levels.indexOf(expected) >= levels.indexOf(minLevel);
-        expect(Boolean(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields))).toBe(selected);
+        if (selected) expect(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields)).toBeDefined();
+        expect(matchesRecord(cwRow([{ field: "@message", value: body }]), { minLevel })).toBe(selected);
         const filter = buildFilter({ ...range, minLevel, limit: 10 });
-        expect(filter ? Boolean(evaluate(filter, szFields)) : true).toBe(selected);
+        if (selected) expect(filter ? Boolean(evaluate(filter, szFields)) : true).toBe(true);
+        expect(matchesRecord(szRow({ data: { body, severity_text: "INFO" } }), { minLevel })).toBe(selected);
       }
     });
   }
@@ -198,13 +197,9 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
     [{ level: "", msg: "", message: "Error: connection" }, "error"],
   ])("honors field precedence for %j", (fields, expected) => {
     const body = JSON.stringify(fields);
-    const wire = { ...fields, "@message": body };
     const szFields = { body, severity_text: "" };
     expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
     expect(szRow({ data: szFields }).level).toBe(expected);
-    expect(insightsFields(SERVICES_QUERY, wire)!.axiLevel).toBe(expected);
-    const queries = (servicesRequest(range) as any).compositeQuery.queries;
-    expect(queries.filter((q: any) => evaluate(q.spec.filter.expression, szFields)).map((q: any) => q.spec.name)).toEqual([expected === "custom" ? "unknown" : expected]);
   });
   it.each([
     ["Error: connection refused", "error"], ["panic: Error", "fatal"], ["Traceback: failed", "error"],
@@ -214,11 +209,12 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
     const szFields = { body, severity_text: "" };
     expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
     expect(szRow({ data: szFields }).level).toBe(expected);
-    expect(insightsFields(SERVICES_QUERY, cwFields)!.axiLevel || "-").toBe(expected);
     for (const minLevel of ["warn", "error", "fatal"] as const) {
       const selected = levels.indexOf(expected as any) >= levels.indexOf(minLevel);
-      expect(Boolean(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields))).toBe(selected);
-      expect(Boolean(evaluate(buildFilter({ ...range, minLevel, limit: 10 }), szFields))).toBe(selected);
+      if (selected) expect(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields)).toBeDefined();
+      expect(matchesRecord(cwRow([{ field: "@message", value: body }]), { minLevel })).toBe(selected);
+      if (selected) expect(evaluate(buildFilter({ ...range, minLevel, limit: 10 }), szFields)).toBe(true);
+      expect(matchesRecord(szRow({ data: szFields }), { minLevel })).toBe(selected);
     }
   });
 });

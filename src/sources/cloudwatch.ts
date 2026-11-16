@@ -13,8 +13,8 @@ import {
 } from "@aws-sdk/client-cloudwatch-logs";
 import { AxiError } from "../lib/errors.js";
 import { maskText } from "../lib/redact.js";
-import { INFERRED_LEVELS, LEVEL_ALIASES, isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
-import type { LogQuery, LogRecord, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
+import { ID_FIELDS, INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
+import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface CloudWatchEnv {
   profile?: string;
@@ -68,45 +68,33 @@ const list = (xs: string[]) => "[" + xs.map((x) => JSON.stringify(x)).join(", ")
 /** The Insights query for a LogQuery. Exported for tests. */
 export function buildQuery(q: LogQuery): string {
   const filters: string[] = [];
-  if (q.service) filters.push(`svc in ${list(serviceAliases(q.service))}`);
-  if (q.minLevel && q.minLevel !== "debug") filters.push(`axiLevel in ${list(levelsAtLeast(q.minLevel))}`);
+  if (q.service && q.service !== "-") {
+    const names = serviceAliases(q.service);
+    filters.push(`(service in ${list(names)} or @logStream like /^(${names.map(reEscape).join("|")})\\//)`);
+  }
+  if (q.minLevel && q.minLevel !== "debug") {
+    const levels = levelsAtLeast(q.minLevel);
+    const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
+    const explicit = ["level", "severity", "severity_text"].map((field) => `${field} like /(?i)^(${aliases.join("|")})$/`);
+    const inferred = ["msg", "message", "@message"].flatMap((field) => INFERRED_LEVELS.filter(([level]) => levels.includes(level)).map(([, pattern]) => `${field} like /(?i)${pattern}/`));
+    filters.push("(" + [...explicit, ...inferred].join(" or ") + ")");
+  }
   if (q.text) filters.push(`@message like /(?i)${reEscape(q.text)}/`);
-  if (q.id) filters.push(`@message like ${JSON.stringify(q.id)}`);
+  if (q.id) {
+    const hex = /^[0-9a-f]{32}$/i.test(q.id);
+    const ids = ID_FIELDS.map((field) => hex ? `${field} like /(?i)^${q.id}$/` : `${field} = ${JSON.stringify(q.id)}`);
+    ids.push(hex ? `@message like /(?i)${q.id}/` : `@message like ${JSON.stringify(q.id)}`);
+    filters.push("(" + ids.join(" or ") + ")");
+  }
   return [
-    ...SERVICE_QUERY,
-    ...LEVEL_QUERY,
+    "fields @timestamp, @message, @logStream",
     ...filters.map((f) => `| filter ${f}`),
     "| sort @timestamp desc",
     `| limit ${q.limit}`,
   ].join("\n");
 }
 
-const SERVICE_QUERY = [
-  "fields @timestamp, @message, @logStream",
-  "| parse @logStream /^(?<stream>[^\\/]+)/",
-  '| fields case(isempty(service) = 0, service, isempty(stream) = 0, stream, "-") as svc',
-];
-
-const LEVEL_QUERY = [
-  `| fields case(isempty(level) = 0, level, isempty(severity) = 0, severity, severity_text) as axiRawLevel`,
-  `| fields case(isempty(msg) = 0, msg, isempty(message) = 0, message, @message) as axiMessage`,
-  "| fields case(" + [
-    ...levelsAtLeast("debug").flatMap((level) => [
-      `tolower(axiRawLevel) in ${list(Object.entries(LEVEL_ALIASES).filter(([, value]) => value === level).map(([alias]) => alias))}`,
-      JSON.stringify(level),
-    ]),
-    ...INFERRED_LEVELS.flatMap(([level, pattern]) => [`isempty(axiRawLevel) = 1 and axiMessage like /(?i)${pattern}/`, JSON.stringify(level)]),
-    `case(isempty(axiRawLevel) = 1, "-", tolower(axiRawLevel))`,
-  ].join(", ") + ") as axiLevel",
-];
-
-export const SERVICES_QUERY = [
-  ...SERVICE_QUERY,
-  ...LEVEL_QUERY,
-  "| fields axiLevel as lvl",
-  "| stats count(*) as n by svc, lvl",
-  "| limit 1000",
-].join("\n");
+export const SERVICES_QUERY = "stats count(*) as n";
 
 const fieldOf = (row: ResultField[], name: string) => row.find((f) => f.field === name)?.value;
 
@@ -153,19 +141,18 @@ class CloudWatchSource implements Source {
     }
   }
 
-  async query(q: LogQuery): Promise<LogRecord[]> {
+  async query(q: LogQuery): Promise<QueryResult<LogRecord>> {
     if (q.service && !SAFE_TOKEN.test(q.service)) throw new AxiError(`invalid service name \`${q.service}\``, { exitCode: 2 });
     if (q.id && !SAFE_TOKEN.test(q.id)) throw new AxiError(`invalid id \`${q.id}\``, { exitCode: 2 });
-    const rows = await this.run(buildQuery(q), q, q.limit);
-    return rows.map(parseRow);
+    const candidates = await this.run(buildQuery({ ...q, limit: MAX_SCAN }), q, MAX_SCAN);
+    const selected = candidates.map(parseRow).filter((record) => matchesRecord(record, q));
+    return { rows: selected.slice(0, q.limit), partial: candidates.length >= MAX_SCAN && selected.length < q.limit };
   }
 
-  async serviceCounts(range: TimeRange): Promise<ServiceCount[]> {
-    const rows = await this.run(SERVICES_QUERY, range, 1000);
-    return rows.map((row) => ({
-      service: fieldOf(row, "svc") ?? "-",
-      level: normalizeLevel(fieldOf(row, "lvl")),
-      count: Number(fieldOf(row, "n") ?? 0),
-    }));
+  async serviceCounts(range: TimeRange): Promise<QueryResult<ServiceCount>> {
+    const totals = await this.run(SERVICES_QUERY, range, 1);
+    const total = Number(fieldOf(totals[0] ?? [], "n") ?? 0);
+    const sample = await this.query({ ...range, limit: MAX_SCAN });
+    return { rows: countServices(sample.rows), partial: sample.partial || total > sample.rows.length || sample.rows.length >= MAX_SCAN };
   }
 }

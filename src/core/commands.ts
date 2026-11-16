@@ -24,6 +24,7 @@ export interface Ctx {
   redact: boolean;
   full: boolean;
   stats: RedactStats;
+  partial?: boolean;
 }
 
 export interface Output {
@@ -32,7 +33,8 @@ export interface Output {
 }
 
 async function fetchLines(ctx: Ctx, q: Omit<LogQuery, "start" | "end">): Promise<LogRecord[]> {
-  const rows = await ctx.source.query({ ...q, ...ctx.range });
+  const { rows, partial } = await ctx.source.query({ ...q, ...ctx.range });
+  ctx.partial = partial;
   return ctx.redact ? rows.map((r) => redactRecord(r, ctx.stats)) : rows;
 }
 
@@ -75,6 +77,10 @@ function lineTable(ctx: Ctx, rows: LogRecord[], opts: { showTrace: boolean }) {
 }
 
 function finish(ctx: Ctx, body: Record<string, unknown>, help: Help): Output {
+  if (ctx.partial) {
+    body.partial = true;
+    help.unshift("scan limit reached; results and counts may be partial (counts are lower bounds); narrow --since");
+  }
   if (ctx.stats.droppedFields > 0) body.redacted = `${ctx.stats.droppedFields} patient-data fields dropped`;
   return { body, help };
 }
@@ -111,11 +117,11 @@ function run(ctx: Ctx, ...parts: (string | false | undefined)[]): string {
   return "Run `" + [ctx.prefix, ...parts].filter(Boolean).join(" ") + "`";
 }
 
-function filterArgs(f: Partial<LineFlags>): string {
+function filterArgs(ctx: Ctx, f: Partial<LineFlags>): string {
   return [
     f.service ? `--service ${f.service}` : "",
     f.level ? `--level ${f.level}` : "",
-    f.text ? JSON.stringify(f.text) : "",
+    f.text ? JSON.stringify(ctx.redact ? "<search text>" : f.text) : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -125,7 +131,7 @@ export function tail(ctx: Ctx, f: LineFlags): Promise<Output> {
   return lines(
     ctx,
     { service: f.service, minLevel: f.level, limit: f.limit },
-    [run(ctx, "tail --since 1h", filterArgs(f)) + " to look further back", run(ctx, "services") + " to see which services are logging"],
+    [run(ctx, "tail --since 1h", filterArgs(ctx, f)) + " to look further back", run(ctx, "services") + " to see which services are logging"],
     [run(ctx, "errors", f.service && `--service ${f.service}`) + " to group recent errors"],
   );
 }
@@ -135,7 +141,7 @@ export function search(ctx: Ctx, f: LineFlags): Promise<Output> {
     ctx,
     { service: f.service, minLevel: f.level, text: f.text, limit: f.limit },
     [
-      run(ctx, "search", filterArgs(f), "--since 24h") + " to widen the range",
+      run(ctx, "search", filterArgs(ctx, f), "--since 24h") + " to widen the range",
       run(ctx, "fields") + " to see which fields exist",
     ],
     [run(ctx, "trace <traceId|requestId|caseId>") + " to follow one request across services"],
@@ -181,7 +187,7 @@ export async function errors(ctx: Ctx, f: Omit<LineFlags, "text">): Promise<Outp
   const rows = await fetchLines(ctx, { service: f.service, minLevel: level, limit: ERRORS_SCAN });
   if (rows.length === 0) {
     return finish(ctx, { range: ctx.rangeLabel, [level === "error" ? "errors" : `${level}+ lines`]: 0 }, [
-      run(ctx, "errors --since 24h", filterArgs({ service: f.service, level: f.level })) + " to look further back",
+      run(ctx, "errors --since 24h", filterArgs(ctx, { service: f.service, level: f.level })) + " to look further back",
       run(ctx, "tail", f.service && `--service ${f.service}`) + " to see the latest lines of any level",
     ]);
   }
@@ -233,7 +239,8 @@ export async function errors(ctx: Ctx, f: Omit<LineFlags, "text">): Promise<Outp
 }
 
 export async function services(ctx: Ctx): Promise<Output> {
-  const counts = await ctx.source.serviceCounts(ctx.range);
+  const { rows: counts, partial } = await ctx.source.serviceCounts(ctx.range);
+  ctx.partial = partial;
   // `case` (a stream prefix) and `case-service` (the logger's name) are one service: one row, the longer name
   const by = new Map<string, { service: string; lines: number; errors: number; warns: number }>();
   for (const c of counts) {

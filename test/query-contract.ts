@@ -51,7 +51,9 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       if (typeof value === "string") {
         try { value = JSON.parse(value); } catch { return undefined; }
       }
-      return read(value, path.join("."));
+      const scalar = read(value, path.join("."));
+      if (scalar === undefined) return undefined;
+      return scalar === null || typeof scalar === "object" ? "" : String(scalar);
     }
     if (["attribute", "resource", "log"].includes(root!) && path.length) {
       return read(fields[root!] ?? (fields.log || fields.attribute || fields.resource ? {} : fields), path.join("."));
@@ -115,7 +117,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     if (["=", "like", "regexp", "contains"].includes(op)) {
       at++;
       const right = primary();
-      return apply((value) => op === "=" ? value === right : op === "contains" ? String(value ?? "").includes(right)
+      return apply((value) => op === "=" ? value === right : op === "contains" ? String(value ?? "").toLowerCase().includes(String(right).toLowerCase())
         : right instanceof RegExp ? right.test(String(value ?? ""))
         : op === "regexp" ? new RegExp(right.replace("(?i)", ""), right.includes("(?i)") ? "i" : "").test(String(value ?? ""))
         : String(value ?? "").includes(right));

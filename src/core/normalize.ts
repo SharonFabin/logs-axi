@@ -1,5 +1,5 @@
 /** Shared helpers adapters use to normalize what their source returns. */
-import { LEVELS, type Level, type LogRecord } from "./types.js";
+import { LEVELS, type Level, type LogRecord, type LogQuery, type ServiceCount } from "./types.js";
 
 export const LEVEL_ALIASES: Record<string, Level> = {
   trace: "debug",
@@ -32,6 +32,30 @@ export function levelsAtLeast(min: Level): Level[] {
 /** `case` and `case-service` name one service: the logger says one, the stream prefix the other. */
 export function serviceAliases(name: string): string[] {
   return name.endsWith("-service") ? [name, name.slice(0, -"-service".length)] : [name, `${name}-service`];
+}
+
+export const ID_FIELDS = ["traceId", "trace_id", "requestId", "correlationId", "caseId", "runId"];
+export const MAX_SCAN = 10000;
+
+export function matchesRecord(record: LogRecord, query: Pick<LogQuery, "minLevel" | "service" | "id">): boolean {
+  if (query.minLevel && !levelsAtLeast(query.minLevel).includes(record.level as Level)) return false;
+  if (query.service && !serviceAliases(query.service).includes(record.service)) return false;
+  if (query.id) {
+    const traceMatch = record.traceId === query.id || (/^[0-9a-f]{32}$/i.test(query.id) && record.traceId?.toLowerCase() === query.id.toLowerCase());
+    if (!traceMatch && !ID_FIELDS.some((key) => str(record.fields[key]) === query.id)) return false;
+  }
+  return true;
+}
+
+export function countServices(records: LogRecord[]): ServiceCount[] {
+  const counts = new Map<string, ServiceCount>();
+  for (const record of records) {
+    const key = JSON.stringify([record.service, record.level]);
+    const entry = counts.get(key) ?? { service: record.service, level: record.level, count: 0 };
+    entry.count++;
+    counts.set(key, entry);
+  }
+  return [...counts.values()];
 }
 
 const STRUCTURAL = new Set(["time", "timestamp", "@timestamp", "level", "severity", "severity_text", "service", "msg", "message"]);

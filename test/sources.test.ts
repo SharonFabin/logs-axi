@@ -10,7 +10,7 @@ const range = { start: 1_000_000, end: 2_000_000 };
 describe("cloudwatch", () => {
   it("builds an Insights query from the shared filters", () => {
     const q = buildQuery({ ...range, service: "case", minLevel: "error", text: "pay.er", id: "abc-123", limit: 50 });
-    expect(insightsFields(q, { service: "case", level: "error", "@message": "pay.er abc-123", "@logStream": "other/container/task" })!.svc).toBe("case");
+    expect(insightsFields(q, { service: "case", level: "error", "@message": "pay.er abc-123", "@logStream": "other/container/task" })).toBeDefined();
     expect(insightsFields(q, { service: "case", level: "critical", "@message": "pay.er abc-123" })).toBeDefined();
     expect(insightsFields(q, { service: "case", level: "info", "@message": "pay.er abc-123" })).toBeUndefined();
     expect(q).toContain("@message like /(?i)pay\\.er/");
@@ -39,12 +39,12 @@ describe("cloudwatch", () => {
     const src = cloudwatch({ region: "us-east-1", logGroups: ["/point360/dev"] }, "t", async (cmd: any) => {
       seen.push(cmd.constructor.name);
       if (cmd.constructor.name === "StartQueryCommand") {
-        expect(cmd.input).toMatchObject({ logGroupNames: ["/point360/dev"], startTime: 1000, endTime: 2000, limit: 5 });
+        expect(cmd.input).toMatchObject({ logGroupNames: ["/point360/dev"], startTime: 1000, endTime: 2000, limit: 10_000 });
         return { queryId: "q" };
       }
       return ++polls < 2 ? { status: "Running" } : { status: "Complete", results: [] };
     });
-    expect(await src.query({ ...range, limit: 5 })).toEqual([]);
+    expect(await src.query({ ...range, limit: 5 })).toEqual({ rows: [], partial: false });
     expect(seen).toEqual(["StartQueryCommand", "GetQueryResultsCommand", "GetQueryResultsCommand"]);
   });
 

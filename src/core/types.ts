@@ -43,9 +43,14 @@ export interface ServiceCount {
   count: number;
 }
 
+export interface QueryResult<T> {
+  rows: T[];
+  partial: boolean;
+}
+
 export interface Source {
-  query(q: LogQuery): Promise<LogRecord[]>;
-  serviceCounts(range: TimeRange): Promise<ServiceCount[]>;
+  query(q: LogQuery): Promise<QueryResult<LogRecord>>;
+  serviceCounts(range: TimeRange): Promise<QueryResult<ServiceCount>>;
 }
 
 /**

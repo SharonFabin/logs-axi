@@ -7,8 +7,8 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { maskText } from "../lib/redact.js";
-import { INFERRED_LEVELS, LEVEL_ALIASES, isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
-import { LEVELS, type Level, type LogQuery, type LogRecord, type ServiceCount, type Source, type SourceFactory, type TimeRange } from "../core/types.js";
+import { ID_FIELDS, INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
+import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
   endpoint: string;
@@ -74,63 +74,36 @@ function httpTransport(env: SignozEnv, label: string): SignozTransport {
 const lit = (s: string, like = false) =>
   "'" + (like ? s.replace(/[\\%_]/g, "\\$&") : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
 
-const ID_FIELDS = ["traceId", "trace_id", "requestId", "correlationId", "caseId", "runId"];
-
 const LEVEL_FIELDS = ["body.level", "body.severity", "body.severity_text", "attribute.level", "attribute.severity", "attribute.severity_text", "log.severity_text"];
 const SERVICE_FIELDS = [
-  { name: "service", fieldContext: "body" },
   { name: "service.name", fieldContext: "resource" },
   { name: "service", fieldContext: "attribute" },
 ];
-const SERVICE_FILTER_FIELDS = SERVICE_FIELDS.map((field) => `${field.fieldContext}.${field.name}`);
-const missing = (field: string) => `(${field} NOT EXISTS OR ${field} = '')`;
-const all = (parts: string[]) => "(" + parts.join(" AND ") + ")";
+const SERVICE_FILTER_FIELDS = ["body.service", ...SERVICE_FIELDS.map((field) => `${field.fieldContext}.${field.name}`)];
 const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
-
-function levelFilter(level: Level): string {
-  const aliases = Object.entries(LEVEL_ALIASES).filter(([, value]) => value === level).map(([alias]) => alias);
-  const explicit = LEVEL_FIELDS.map((field, i) => all([
-    ...LEVEL_FIELDS.slice(0, i).map(missing),
-    `${field} REGEXP ${lit("(?i)^(" + aliases.join("|") + ")$")}`,
-  ]));
-  const inferred = INFERRED_LEVELS.findIndex(([value]) => value === level);
-  if (inferred >= 0) {
-    const messages = ["body.msg", "body.message", "log.body"];
-    explicit.push(all([
-      ...LEVEL_FIELDS.map(missing),
-      any(messages.map((field, i) => all([
-        ...messages.slice(0, i).map(missing),
-        ...INFERRED_LEVELS.slice(0, inferred).map(([, pattern]) => `${field} NOT REGEXP ${lit("(?i)" + pattern)}`),
-        `${field} REGEXP ${lit("(?i)" + INFERRED_LEVELS[inferred]![1])}`,
-      ]))),
-    ]));
-  }
-  return any(explicit);
-}
 
 /** The v5 filter expression for a LogQuery. Exported for tests. */
 export function buildFilter(q: LogQuery): string {
   const parts: string[] = [];
-  if (q.service) parts.push(any([
-    ...SERVICE_FILTER_FIELDS.map((field, i) => all([
-      ...SERVICE_FILTER_FIELDS.slice(0, i).map(missing),
-      `${field} IN (${serviceAliases(q.service!).map((s) => lit(s)).join(", ")})`,
-    ])),
-    ...(q.service === "-" ? [all(SERVICE_FILTER_FIELDS.map(missing))] : []),
-  ]));
+  if (q.service && q.service !== "-") parts.push(any(SERVICE_FILTER_FIELDS.map((field) => `${field} IN (${serviceAliases(q.service!).map((name) => lit(name)).join(", ")})`)));
   if (q.minLevel && q.minLevel !== "debug") {
-    parts.push(any(levelsAtLeast(q.minLevel).map(levelFilter)));
+    const levels = levelsAtLeast(q.minLevel);
+    const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
+    parts.push(any([
+      ...LEVEL_FIELDS.map((field) => `${field} REGEXP ${lit("(?i)^(" + aliases.join("|") + ")$")}`),
+      ...["body.msg", "body.message", "log.body"].flatMap((field) => INFERRED_LEVELS.filter(([level]) => levels.includes(level)).map(([, pattern]) => `${field} REGEXP ${lit("(?i)" + pattern)}`)),
+    ]));
   }
   if (q.text) parts.push(`log.body CONTAINS ${lit(q.text, true)}`);
   if (q.id) {
-    const matches = ID_FIELDS.flatMap((field) => ["body", "attribute"].map((context) => `${context}.${field} = ${lit(q.id!)}`));
+    const matches = ID_FIELDS.flatMap((field) => ["body", "attribute"].map((context) => /^[0-9a-f]{32}$/i.test(q.id!) ? `${context}.${field} REGEXP ${lit("(?i)^" + q.id + "$")}` : `${context}.${field} = ${lit(q.id!)}`));
     if (/^[0-9a-f]{32}$/i.test(q.id)) matches.push(`log.trace_id = ${lit(q.id.toLowerCase())}`);
     parts.push(any(matches));
   }
   return parts.join(" AND ");
 }
 
-export function rawRequest(q: LogQuery): unknown {
+export function rawRequest(q: LogQuery, offset = 0): unknown {
   return {
     schemaVersion: "v1",
     start: q.start,
@@ -145,7 +118,7 @@ export function rawRequest(q: LogQuery): unknown {
             signal: "logs",
             filter: { expression: buildFilter(q) },
             limit: q.limit,
-            offset: 0,
+            offset,
             order: [
               { key: { name: "timestamp" }, direction: "desc" },
               { key: { name: "id" }, direction: "desc" },
@@ -164,25 +137,24 @@ export function servicesRequest(range: TimeRange): unknown {
     end: range.end,
     requestType: "scalar",
     compositeQuery: {
-      queries: [...LEVELS, "unknown"].map((level) => ({
+      queries: [{
         type: "builder_query",
         spec: {
-          name: level,
+          name: "A",
           signal: "logs",
-          filter: { expression: level === "unknown" ? `NOT ${any(LEVELS.map(levelFilter))}` : levelFilter(level as Level) },
           aggregations: [{ expression: "count()", alias: "n" }],
           groupBy: SERVICE_FIELDS,
+          order: [{ key: { name: "count()" }, direction: "desc" }],
           limit: 1000,
         },
-      })),
+      }],
     },
   };
 }
 
 interface V5Result {
-  queryName?: string;
   rows?: { timestamp?: unknown; data?: Record<string, unknown> }[] | null;
-  columns?: { name: string; fieldContext?: string; columnType?: string }[];
+  columns?: { columnType?: string }[];
   data?: unknown[][] | null;
 }
 
@@ -223,26 +195,36 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
 class SignozSource implements Source {
   constructor(private request: SignozTransport) {}
 
-  async query(q: LogQuery): Promise<LogRecord[]> {
+  async query(q: LogQuery): Promise<QueryResult<LogRecord>> {
     if (q.service && !SAFE_TOKEN.test(q.service)) throw new AxiError(`invalid service name \`${q.service}\``, { exitCode: 2 });
     if (q.id && !SAFE_TOKEN.test(q.id)) throw new AxiError(`invalid id \`${q.id}\``, { exitCode: 2 });
-    return results(await this.request("/api/v5/query_range", rawRequest(q))).flatMap((r) => (r.rows ?? []).map(parseRow));
+    const rows: LogRecord[] = [];
+    const pageSize = Math.min(1000, Math.max(100, q.limit));
+    let offset = 0;
+    while (offset < MAX_SCAN) {
+      const limit = Math.min(pageSize, MAX_SCAN - offset);
+      const page = results(await this.request("/api/v5/query_range", rawRequest({ ...q, limit }, offset))).flatMap((result) => result.rows ?? []);
+      offset += page.length;
+      for (const row of page) {
+        const record = parseRow(row);
+        if (matchesRecord(record, q)) rows.push(record);
+        if (rows.length === q.limit) return { rows, partial: false };
+      }
+      if (page.length < limit) return { rows, partial: false };
+    }
+    return { rows, partial: true };
   }
 
-  async serviceCounts(range: TimeRange): Promise<ServiceCount[]> {
-    const out: ServiceCount[] = [];
-    for (const r of results(await this.request("/api/v5/query_range", servicesRequest(range)))) {
-      const cols = r.columns ?? [];
-      const serviceColumns = SERVICE_FIELDS.map((field) => cols.findIndex((column) => column.name === field.name && column.fieldContext === field.fieldContext));
-      const n = cols.findIndex((c) => c.columnType === "aggregation");
-      for (const row of r.data ?? []) {
-        out.push({
-          service: serviceColumns.map((i) => str(row[i])).find((value) => value !== undefined) ?? "-",
-          level: r.queryName === "unknown" ? "-" : normalizeLevel(r.queryName),
-          count: Number(row[n] ?? 0),
-        });
-      }
+  async serviceCounts(range: TimeRange): Promise<QueryResult<ServiceCount>> {
+    const groups = results(await this.request("/api/v5/query_range", servicesRequest(range)));
+    let total = 0;
+    let partial = false;
+    for (const result of groups) {
+      const count = (result.columns ?? []).findIndex((column) => column.columnType === "aggregation");
+      for (const row of result.data ?? []) total += Number(row[count] ?? 0);
+      if ((result.data?.length ?? 0) >= 1000) partial = true;
     }
-    return out;
+    const sample = await this.query({ ...range, limit: MAX_SCAN });
+    return { rows: countServices(sample.rows), partial: partial || sample.partial || total > sample.rows.length || sample.rows.length >= MAX_SCAN };
   }
 }

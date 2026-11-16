@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { run } from "../src/cli.js";
 import { isPatientField, redactObject } from "../src/lib/redact.js";
-import { buildQuery, SERVICES_QUERY, parseRow as cwRow } from "../src/sources/cloudwatch.js";
-import { buildFilter, parseRow as szRow, servicesRequest, signoz } from "../src/sources/signoz.js";
+import { buildQuery, parseRow as cwRow } from "../src/sources/cloudwatch.js";
+import { buildFilter, parseRow as szRow, signoz } from "../src/sources/signoz.js";
+import { matchesRecord } from "../src/core/normalize.js";
 import { evaluate, insightsFields } from "./query-contract.js";
 import { events, NOW, TEST_CONFIG, cloudwatchStub, signozStub } from "./fixtures.js";
 
@@ -86,7 +87,6 @@ describe("credential diagnostics", () => {
 type WireRow = { timestamp: string; data: Record<string, any> };
 const wireFields = (row: WireRow) => ({ attribute: row.data.attributes_string ?? {}, resource: row.data.resources_string ?? {}, log: { body: row.data.body, severity_text: row.data.severity_text, trace_id: row.data.trace_id } });
 const serviceKeys = [
-  { name: "service", fieldContext: "body", fieldDataType: "string" },
   { name: "service.name", fieldContext: "resource", fieldDataType: "string" },
   { name: "service", fieldContext: "attribute", fieldDataType: "string" },
 ];
@@ -94,8 +94,8 @@ function wireTransport(rows: WireRow[]) {
   return async (path: string, request: any) => {
     expect(path).toBe("/api/v5/query_range");
     const results = request.compositeQuery.queries.map(({ spec }: any) => {
-      const selected = rows.filter((row) => !spec.filter.expression || evaluate(spec.filter.expression, wireFields(row)));
-      if (request.requestType === "raw") return { queryName: spec.name, rows: selected.slice(0, spec.limit) };
+      const selected = rows.filter((row) => !spec.filter?.expression || evaluate(spec.filter.expression, wireFields(row)));
+      if (request.requestType === "raw") return { queryName: spec.name, rows: selected.slice(spec.offset ?? 0, (spec.offset ?? 0) + spec.limit) };
       const groups = new Map<string, { values: unknown[]; count: number }>();
       for (const key of spec.groupBy) expect(serviceKeys.some((field) => field.name === key.name && field.fieldContext === key.fieldContext)).toBe(true);
       for (const row of selected) {
@@ -118,19 +118,19 @@ it("SigNoz context predicates obey its documented context rules and count confli
   expect(evaluate("severity_text = 'ERROR'", fields)).toBe(true);
   expect(evaluate("severity_text = 'WARN'", fields)).toBe(true);
   expect(szRow(input).level).toBe("warn");
-  expect(evaluate(buildFilter({ ...range, minLevel: "error", limit: 10 }), fields)).toBe(false);
-  const buckets = (servicesRequest(range) as any).compositeQuery.queries.filter(({ spec }: any) => evaluate(spec.filter.expression, fields)).map(({ spec }: any) => spec.name);
-  expect(buckets).toEqual(["warn"]);
+  expect(evaluate(buildFilter({ ...range, minLevel: "error", limit: 10 }), fields)).toBe(true);
+  expect(matchesRecord(szRow(input), { minLevel: "error" })).toBe(false);
   const transport = wireTransport([input]);
   const src = signoz({ endpoint: "http://x" }, "t", transport);
-  expect(await src.query({ ...range, minLevel: "error", limit: 10 })).toEqual([]);
-  expect(await src.serviceCounts(range)).toEqual([{ service: "case-service", level: "warn", count: 1 }]);
+  expect(await src.query({ ...range, minLevel: "error", limit: 10 })).toEqual({ rows: [], partial: false });
+  expect(await src.serviceCounts(range)).toEqual({ rows: [{ service: "case-service", level: "warn", count: 1 }], partial: false });
 });
 
 it.each(["level", "severity", "severity_text"])("SigNoz ignores other contexts when choosing attribute.%s", async (field) => {
   const input = row({ body: "ordinary request", severity_text: "ERROR", resources_string: { "service.name": "case-service", [field]: "FATAL" }, attributes_string: { [field]: "WARN" } });
   expect(szRow(input).level).toBe("warn");
-  expect(evaluate(buildFilter({ ...range, minLevel: "error", limit: 10 }), wireFields(input))).toBe(false);
+  expect(evaluate(buildFilter({ ...range, minLevel: "error", limit: 10 }), wireFields(input))).toBe(true);
+  expect(matchesRecord(szRow(input), { minLevel: "error" })).toBe(false);
 });
 
 it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id"])("SigNoz follows %s from JSON bodies and attributes even when it is 32 hex digits", async (field) => {
@@ -139,7 +139,7 @@ it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id"]
     const attribute = row({ body: "failed", severity_text: "ERROR", attributes_string: { [field]: id } });
     const unrelated = row({ body: "failed", severity_text: "ERROR", attributes_string: { residentId: id } });
     const src = signoz({ endpoint: "http://x" }, "t", wireTransport([body, attribute, unrelated]));
-    expect(await src.query({ ...range, id, limit: 10 })).toHaveLength(2);
+    expect((await src.query({ ...range, id, limit: 10 })).rows).toHaveLength(2);
     const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wireTransport([body]) } };
     const errors = JSON.parse((await run(["signoz", "dev", "errors", "--json"], deps)).out);
     expect(errors.groups[0].sample).toBe(id);
@@ -158,47 +158,24 @@ it.each([
   const input = row({ body: JSON.stringify({ level: "error", msg: "failed", ...body }), severity_text: "ERROR", resources_string: resource, attributes_string: attribute });
   expect(szRow(input).service).toBe(expected);
   const src = signoz({ endpoint: "http://x" }, "t", wireTransport([input]));
-  expect(await src.query({ ...range, service: expected === "-" ? "-" : "case", limit: 10 })).toHaveLength(1);
-  expect(await src.query({ ...range, service: "other", limit: 10 })).toHaveLength(0);
-  expect(await src.serviceCounts(range)).toEqual([{ service: expected, level: "error", count: 1 }]);
+  expect((await src.query({ ...range, service: expected === "-" ? "-" : "case", limit: 10 })).rows).toHaveLength(1);
+  expect((await src.query({ ...range, service: "other", limit: 10 })).rows).toHaveLength(0);
+  expect(await src.serviceCounts(range)).toEqual({ rows: [{ service: expected, level: "error", count: 1 }], partial: false });
 });
 
 it("SigNoz resource-only service counts tolerate absent body and attribute service values", async () => {
   const input = row({ body: "request", severity_text: "INFO", resources_string: { "service.name": "case-service" } });
   const src = signoz({ endpoint: "http://x" }, "t", wireTransport([input]));
-  expect(await src.serviceCounts(range)).toEqual([{ service: "case-service", level: "info", count: 1 }]);
-});
-
-it("SigNoz decodes same-named service columns by context even when reordered", async () => {
-  const src = signoz({ endpoint: "http://x" }, "t", async (path: string, request: any) => {
-    expect(path).toBe("/api/v5/query_range");
-    expect(request.requestType).toBe("scalar");
-    return { status: "success", data: { data: { results: [{
-      queryName: "error",
-      columns: [
-        { name: "service", fieldContext: "attribute", columnType: "group" },
-        { name: "n", columnType: "aggregation" },
-        { name: "service.name", fieldContext: "resource", columnType: "group" },
-        { name: "service", fieldContext: "body", columnType: "group" },
-      ],
-      data: [["ignored", 3, "shared", "case-service"], ["ignored", 7, "shared", "ehr-service"], ["attribute-service", 2, null, null], ["ignored", 5, "resource-service", null]],
-    }] } } };
-  });
-  expect(await src.serviceCounts(range)).toEqual([
-    { service: "case-service", level: "error", count: 3 },
-    { service: "ehr-service", level: "error", count: 7 },
-    { service: "attribute-service", level: "error", count: 2 },
-    { service: "resource-service", level: "error", count: 5 },
-  ]);
+  expect(await src.serviceCounts(range)).toEqual({ rows: [{ service: "case-service", level: "info", count: 1 }], partial: false });
 });
 
 it("SigNoz keeps body services distinct when their resource service is shared", async () => {
   const rows = ["case-service", "ehr-service"].map((service) => row({ body: JSON.stringify({ service, level: "error", msg: "failed" }), resources_string: { "service.name": "shared-service" } }));
   const src = signoz({ endpoint: "http://x" }, "t", wireTransport(rows));
-  expect(await src.serviceCounts(range)).toEqual([
+  expect(await src.serviceCounts(range)).toEqual({ rows: [
     { service: "case-service", level: "error", count: 1 },
     { service: "ehr-service", level: "error", count: 1 },
-  ]);
+  ], partial: false });
 });
 
 it.each([
@@ -210,7 +187,6 @@ it.each([
   const message = JSON.stringify({ level: "error", msg: "failed", ...body });
   const fields = { ...body, level: "error", "@message": message, "@logStream": stream };
   expect(cwRow([{ field: "@message", value: message }, { field: "@logStream", value: stream }]).service).toBe(expected);
-  expect(insightsFields(SERVICES_QUERY, fields)!.svc).toBe(expected);
   expect(insightsFields(buildQuery({ ...range, service: expected === "-" ? "-" : "case", limit: 10 }), fields)).toBeDefined();
-  expect(insightsFields(buildQuery({ ...range, service: "other", limit: 10 }), fields)).toBeUndefined();
+  expect(matchesRecord(cwRow([{ field: "@message", value: message }, { field: "@logStream", value: stream }]), { service: "other" })).toBe(false);
 });

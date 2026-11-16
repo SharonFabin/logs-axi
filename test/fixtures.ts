@@ -105,26 +105,8 @@ export function cloudwatchResults(evs: Event[]) {
 }
 
 /** Logs Insights results for the services stats query. */
-export function cloudwatchServiceStats(evs: Event[], query: string) {
-  const counts = new Map<string, number>();
-  for (const e of evs) {
-    const wire = JSON.parse(line(e));
-    const selected = insightsFields(query, { ...wire, "@message": line(e), "@logStream": `${e.service}/container/task` });
-    if (!selected) continue;
-    const key = `${selected.svc}\u0000${selected.axiLevel}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return {
-    results: [...counts.entries()].map(([k, n]) => {
-      const [svc, lvl] = k.split("\u0000");
-      return [
-        { field: "svc", value: svc },
-        { field: "lvl", value: lvl },
-        { field: "n", value: String(n) },
-      ];
-    }),
-    status: "Complete",
-  };
+export function cloudwatchServiceStats(evs: Event[]) {
+  return { results: [[{ field: "n", value: String(evs.length) }]], status: "Complete" };
 }
 
 const SEVERITY: Record<string, number> = { debug: 5, info: 9, warn: 13, error: 17 };
@@ -188,10 +170,11 @@ export function signozServiceStats(evs: Event[], specs: any[]) {
   return {
     status: "success",
     data: { type: "scalar", data: { results: specs.map((spec) => {
+      if (spec.groupBy.some((field: any) => field.fieldContext === "body")) throw new Error("body fields can be filtered but not selected or grouped on a string-body store");
       const counts = new Map<string, { values: unknown[]; count: number }>();
       for (const e of evs) {
         const fields = signozFields(e);
-        if (!evaluate(spec.filter.expression, fields)) continue;
+        if (spec.filter?.expression && !evaluate(spec.filter.expression, fields)) continue;
         const values = spec.groupBy.map((g: any) => evaluate(`${g.fieldContext}.${g.name}`, fields) ?? "");
         const key = JSON.stringify(values);
         const group = counts.get(key) ?? { values, count: 0 };
@@ -217,8 +200,8 @@ export interface Recorder {
   responses: unknown[];
 }
 
-function newest(evs: Event[], limit: number): Event[] {
-  return [...evs].sort((a, b) => (a.time < b.time ? 1 : -1)).slice(0, limit);
+function newest(evs: Event[], limit: number, offset = 0): Event[] {
+  return [...evs].sort((a, b) => (a.time < b.time ? 1 : -1)).slice(offset, offset + limit);
 }
 
 export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], responses: [] }) {
@@ -232,7 +215,7 @@ export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], res
       }
       const q = last!.queryString;
       let res: unknown;
-      if (q.includes("stats count(*)")) res = cloudwatchServiceStats(evs, q);
+      if (q.includes("stats count(*)")) res = cloudwatchServiceStats(evs);
       else {
         const selected = evs.filter((e) => insightsFields(q, { ...JSON.parse(line(e)), "@message": line(e), "@logStream": `${e.service.replace(/-service$/, "")}/container/task` }));
         res = cloudwatchResults(newest(selected, last!.limit));
@@ -257,7 +240,7 @@ export function signozStub(evs: Event[], rec: Recorder = { requests: [], respons
       else {
         const spec = body.compositeQuery.queries[0].spec;
         const expr: string = spec.filter.expression;
-        res = signozRaw(newest(evs.filter((e) => !expr || evaluate(expr, signozFields(e))), spec.limit));
+        res = signozRaw(newest(evs.filter((e) => !expr || evaluate(expr, signozFields(e))), spec.limit, spec.offset ?? 0));
       }
       rec.responses.push(res);
       return res;
