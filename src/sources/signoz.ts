@@ -16,7 +16,7 @@ export interface SignozEnv {
   apiKeyEnv?: string;
 }
 
-export type SignozTransport = (path: string, body?: unknown) => Promise<unknown>;
+export type SignozTransport = (path: string, body: unknown) => Promise<unknown>;
 
 export const signoz: SourceFactory = (raw, label, transport) => {
   const env = validate(raw, label);
@@ -46,7 +46,7 @@ function httpTransport(env: SignozEnv, label: string): SignozTransport {
     let text: string;
     try {
       res = await fetch(env.endpoint.replace(/\/$/, "") + path, {
-        method: body === undefined ? "GET" : "POST",
+        method: "POST",
         headers: { "content-type": "application/json", "SIGNOZ-API-KEY": key },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(60_000),
@@ -78,11 +78,11 @@ const ID_FIELDS = ["traceId", "trace_id", "requestId", "correlationId", "caseId"
 
 const LEVEL_FIELDS = ["body.level", "body.severity", "body.severity_text", "attribute.level", "attribute.severity", "attribute.severity_text", "log.severity_text"];
 const SERVICE_FIELDS = [
-  { name: "body.service", fieldContext: "body" },
+  { name: "service", fieldContext: "body" },
   { name: "service.name", fieldContext: "resource" },
   { name: "service", fieldContext: "attribute" },
 ];
-const SERVICE_FILTER_FIELDS = ["body.service", "resource.service.name", "attribute.service"];
+const SERVICE_FILTER_FIELDS = SERVICE_FIELDS.map((field) => `${field.fieldContext}.${field.name}`);
 const missing = (field: string) => `(${field} NOT EXISTS OR ${field} = '')`;
 const all = (parts: string[]) => "(" + parts.join(" AND ") + ")";
 const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
@@ -157,7 +157,7 @@ export function rawRequest(q: LogQuery): unknown {
   };
 }
 
-export function servicesRequest(range: TimeRange, serviceFields = SERVICE_FIELDS): unknown {
+export function servicesRequest(range: TimeRange): unknown {
   return {
     schemaVersion: "v1",
     start: range.start,
@@ -171,7 +171,7 @@ export function servicesRequest(range: TimeRange, serviceFields = SERVICE_FIELDS
           signal: "logs",
           filter: { expression: level === "unknown" ? `NOT ${any(LEVELS.map(levelFilter))}` : levelFilter(level as Level) },
           aggregations: [{ expression: "count()", alias: "n" }],
-          groupBy: serviceFields,
+          groupBy: SERVICE_FIELDS,
           limit: 1000,
         },
       })),
@@ -182,7 +182,7 @@ export function servicesRequest(range: TimeRange, serviceFields = SERVICE_FIELDS
 interface V5Result {
   queryName?: string;
   rows?: { timestamp?: unknown; data?: Record<string, unknown> }[] | null;
-  columns?: { name: string; columnType?: string }[];
+  columns?: { name: string; fieldContext?: string; columnType?: string }[];
   data?: unknown[][] | null;
 }
 
@@ -231,17 +231,9 @@ class SignozSource implements Source {
 
   async serviceCounts(range: TimeRange): Promise<ServiceCount[]> {
     const out: ServiceCount[] = [];
-    const metadata = await this.request("/api/v1/fields/keys?signal=logs&searchText=service&fieldDataType=string&limit=1000") as {
-      status?: string;
-      data?: { complete?: boolean; keys?: Record<string, { name: string; fieldContext: string }[]> };
-    };
-    if (metadata.status !== "success" || metadata.data?.complete !== true) throw new AxiError("signoz: service field metadata is incomplete");
-    const keys = Object.values(metadata.data.keys ?? {}).flat();
-    const serviceFields = SERVICE_FIELDS.filter((field) => keys.some((key) => key.name === field.name && key.fieldContext === field.fieldContext));
-    for (const r of results(await this.request("/api/v5/query_range", servicesRequest(range, serviceFields)))) {
+    for (const r of results(await this.request("/api/v5/query_range", servicesRequest(range)))) {
       const cols = r.columns ?? [];
-      const at = (name: string) => cols.findIndex((c) => c.name === name);
-      const serviceColumns = SERVICE_FIELDS.map((field) => at(field.name));
+      const serviceColumns = SERVICE_FIELDS.map((field) => cols.findIndex((column) => column.name === field.name && column.fieldContext === field.fieldContext));
       const n = cols.findIndex((c) => c.columnType === "aggregation");
       for (const row of r.data ?? []) {
         out.push({

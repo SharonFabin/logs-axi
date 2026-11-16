@@ -86,29 +86,26 @@ describe("credential diagnostics", () => {
 type WireRow = { timestamp: string; data: Record<string, any> };
 const wireFields = (row: WireRow) => ({ attribute: row.data.attributes_string ?? {}, resource: row.data.resources_string ?? {}, log: { body: row.data.body, severity_text: row.data.severity_text, trace_id: row.data.trace_id } });
 const serviceKeys = [
-  { name: "body.service", fieldContext: "body", fieldDataType: "string" },
+  { name: "service", fieldContext: "body", fieldDataType: "string" },
   { name: "service.name", fieldContext: "resource", fieldDataType: "string" },
   { name: "service", fieldContext: "attribute", fieldDataType: "string" },
 ];
 function wireTransport(rows: WireRow[]) {
-  const available = serviceKeys.filter((key) => rows.some((row) => typeof evaluate(key.fieldContext === "body" ? key.name : `${key.fieldContext}.${key.name}`, wireFields(row)) === "string"));
-  return async (_path: string, request?: any) => {
-    if (request === undefined) {
-      return { status: "success", data: { complete: true, keys: Object.fromEntries(available.map((key) => [key.name, [key]])) } };
-    }
+  return async (path: string, request: any) => {
+    expect(path).toBe("/api/v5/query_range");
     const results = request.compositeQuery.queries.map(({ spec }: any) => {
       const selected = rows.filter((row) => !spec.filter.expression || evaluate(spec.filter.expression, wireFields(row)));
       if (request.requestType === "raw") return { queryName: spec.name, rows: selected.slice(0, spec.limit) };
       const groups = new Map<string, { values: unknown[]; count: number }>();
-      for (const key of spec.groupBy) expect(available.some((field) => field.name === key.name && field.fieldContext === key.fieldContext)).toBe(true);
+      for (const key of spec.groupBy) expect(serviceKeys.some((field) => field.name === key.name && field.fieldContext === key.fieldContext)).toBe(true);
       for (const row of selected) {
-        const values = spec.groupBy.map((key: any) => evaluate(key.fieldContext === "body" ? key.name : `${key.fieldContext}.${key.name}`, wireFields(row)) ?? "");
+        const values = spec.groupBy.map((key: any) => evaluate(`${key.fieldContext}.${key.name}`, wireFields(row)) ?? "");
         const key = JSON.stringify(values);
         const group = groups.get(key) ?? { values, count: 0 };
         group.count++;
         groups.set(key, group);
       }
-      return { queryName: spec.name, columns: [...spec.groupBy.map((key: any) => ({ name: key.name, columnType: "group" })), { name: "n", columnType: "aggregation" }], data: [...groups.values()].map((group) => [...group.values, group.count]) };
+      return { queryName: spec.name, columns: [...spec.groupBy.map((key: any) => ({ name: key.name, fieldContext: key.fieldContext, columnType: "group" })), { name: "n", columnType: "aggregation" }], data: [...groups.values()].map((group) => [...group.values, group.count]) };
     });
     return { status: "success", data: { data: { results } } };
   };
@@ -166,15 +163,42 @@ it.each([
   expect(await src.serviceCounts(range)).toEqual([{ service: expected, level: "error", count: 1 }]);
 });
 
-it("SigNoz resource-only service counts do not group by absent JSON or attribute service fields", async () => {
+it("SigNoz resource-only service counts tolerate absent body and attribute service values", async () => {
   const input = row({ body: "request", severity_text: "INFO", resources_string: { "service.name": "case-service" } });
   const src = signoz({ endpoint: "http://x" }, "t", wireTransport([input]));
   expect(await src.serviceCounts(range)).toEqual([{ service: "case-service", level: "info", count: 1 }]);
 });
 
-it("rejects incomplete SigNoz service metadata instead of emitting partial counts", async () => {
-  const src = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "success", data: { complete: false, keys: {} } }));
-  await expect(src.serviceCounts(range)).rejects.toThrow("service field metadata is incomplete");
+it("SigNoz decodes same-named service columns by context even when reordered", async () => {
+  const src = signoz({ endpoint: "http://x" }, "t", async (path: string, request: any) => {
+    expect(path).toBe("/api/v5/query_range");
+    expect(request.requestType).toBe("scalar");
+    return { status: "success", data: { data: { results: [{
+      queryName: "error",
+      columns: [
+        { name: "service", fieldContext: "attribute", columnType: "group" },
+        { name: "n", columnType: "aggregation" },
+        { name: "service.name", fieldContext: "resource", columnType: "group" },
+        { name: "service", fieldContext: "body", columnType: "group" },
+      ],
+      data: [["ignored", 3, "shared", "case-service"], ["ignored", 7, "shared", "ehr-service"], ["attribute-service", 2, null, null], ["ignored", 5, "resource-service", null]],
+    }] } } };
+  });
+  expect(await src.serviceCounts(range)).toEqual([
+    { service: "case-service", level: "error", count: 3 },
+    { service: "ehr-service", level: "error", count: 7 },
+    { service: "attribute-service", level: "error", count: 2 },
+    { service: "resource-service", level: "error", count: 5 },
+  ]);
+});
+
+it("SigNoz keeps body services distinct when their resource service is shared", async () => {
+  const rows = ["case-service", "ehr-service"].map((service) => row({ body: JSON.stringify({ service, level: "error", msg: "failed" }), resources_string: { "service.name": "shared-service" } }));
+  const src = signoz({ endpoint: "http://x" }, "t", wireTransport(rows));
+  expect(await src.serviceCounts(range)).toEqual([
+    { service: "case-service", level: "error", count: 1 },
+    { service: "ehr-service", level: "error", count: 1 },
+  ]);
 });
 
 it.each([

@@ -192,7 +192,7 @@ export function signozServiceStats(evs: Event[], specs: any[]) {
       for (const e of evs) {
         const fields = signozFields(e);
         if (!evaluate(spec.filter.expression, fields)) continue;
-        const values = spec.groupBy.map((g: any) => evaluate(g.fieldContext === "body" ? g.name : `${g.fieldContext}.${g.name}`, fields) ?? "");
+        const values = spec.groupBy.map((g: any) => evaluate(`${g.fieldContext}.${g.name}`, fields) ?? "");
         const key = JSON.stringify(values);
         const group = counts.get(key) ?? { values, count: 0 };
         group.count++;
@@ -200,7 +200,7 @@ export function signozServiceStats(evs: Event[], specs: any[]) {
       }
       return {
         queryName: spec.name,
-        columns: [...spec.groupBy.map((g: any) => ({ name: g.name, columnType: "group" })), { name: "n", columnType: "aggregation" }],
+        columns: [...spec.groupBy.map((g: any) => ({ name: g.name, fieldContext: g.fieldContext, columnType: "group" })), { name: "n", columnType: "aggregation" }],
         data: [...counts.values()].map((group) => [...group.values, group.count]),
       };
     }) } },
@@ -250,19 +250,7 @@ function signozFields(e: Event): Record<string, unknown> {
 
 export function signozStub(evs: Event[], rec: Recorder = { requests: [], responses: [] }) {
   return Object.assign(
-    async (_path: string, body?: any) => {
-      if (body === undefined) {
-        const candidates = [
-          { name: "body.service", fieldContext: "body", expression: "body.service" },
-          { name: "service.name", fieldContext: "resource", expression: "resource.service.name" },
-          { name: "service", fieldContext: "attribute", expression: "attribute.service" },
-        ];
-        const keys: Record<string, unknown[]> = {};
-        for (const { expression, ...field } of candidates) if (evs.some((e) => typeof evaluate(expression, signozFields(e)) === "string")) {
-          (keys[field.name] ??= []).push(field);
-        }
-        return { status: "success", data: { complete: true, keys } };
-      }
+    async (_path: string, body: any) => {
       rec.requests.push(body);
       let res: unknown;
       if (body.requestType === "scalar") res = signozServiceStats(evs, body.compositeQuery.queries.map((q: any) => q.spec));
