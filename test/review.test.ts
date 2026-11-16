@@ -173,7 +173,7 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
     it(`${field}=${spelling} selects and counts as ${expected}`, () => {
       const body = JSON.stringify({ [field]: spelling, msg: "ordinary request" });
       const cwFields = { "@timestamp": NOW - 1000, [field]: spelling, msg: "ordinary request", "@message": body };
-      const szFields = { body, severity_text: "INFO" };
+      const szFields = { log: { body, severity_text: "INFO" } };
       expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
       expect(szRow({ data: { body, severity_text: "INFO" } }).level).toBe(expected);
       for (const minLevel of levels) {
@@ -202,15 +202,15 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
     ["Warning: slow", "warn"], ["noteworthy request", "-"], ["errorless", "-"], ["{Error: broken", "error"], ['{"error":"failed"}', "error"],
   ])("infers %s consistently as %s", (body, expected) => {
     const cwFields = { "@timestamp": NOW - 1000, "@message": body };
-    const szFields = { body, severity_text: "" };
+    const szFields = { log: { body, severity_text: "" } };
     expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
-    expect(szRow({ data: szFields }).level).toBe(expected);
+    expect(szRow({ data: szFields.log }).level).toBe(expected);
     for (const minLevel of ["warn", "error", "fatal"] as const) {
       const selected = levels.indexOf(expected as any) >= levels.indexOf(minLevel);
       if (selected) expect(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields)).toBeDefined();
       expect(matchesRecord(cwRow([{ field: "@message", value: body }]), { minLevel })).toBe(selected);
       if (selected) expect(evaluate(buildFilter({ ...range, minLevel, limit: 10 }), szFields)).toBe(true);
-      expect(matchesRecord(szRow({ data: szFields }), { minLevel })).toBe(selected);
+      expect(matchesRecord(szRow({ data: szFields.log }), { minLevel })).toBe(selected);
     }
   });
 });

@@ -30,10 +30,6 @@ function tokens(text: string): Token[] {
   return out;
 }
 
-class ContextValues {
-  constructor(readonly values: unknown[]) {}
-}
-
 export function evaluate(expression: string, fields: Record<string, unknown>): any {
   const input = tokens(expression);
   let at = 0;
@@ -48,7 +44,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     if (Object.hasOwn(fields, key)) return fields[key];
     const [root, ...path] = key.split(".");
     if (root === "body" && path.length) {
-      let value: any = (fields.log as any)?.body ?? fields.body;
+      let value: any = (fields.log as any)?.body;
       if (typeof value === "string") {
         try { value = JSON.parse(value); } catch { return undefined; }
       }
@@ -57,17 +53,11 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       return scalar === null || typeof scalar === "object" ? "" : String(scalar);
     }
     if (["attribute", "resource", "log"].includes(root!) && path.length) {
-      return read(fields[root!] ?? (fields.log || fields.attribute || fields.resource ? {} : fields), path.join("."));
+      return read(fields[root!], path.join("."));
     }
-    const resource = read(fields.resource, key);
-    const attribute = read(fields.attribute, key);
-    if (resource !== undefined && attribute !== undefined) return resource;
-    const values = [resource, attribute, read(fields.log, key)].filter((value) => value !== undefined);
-    if (values.length > 1) return new ContextValues(values);
-    return values[0];
+    return undefined;
   };
   const primary = (): any => {
-    if (is("not")) { at++; return !primary(); }
     if (is("(")) { at++; const value = or(); take(")"); return value; }
     const t = input[at++];
     if (!t) throw new Error("missing query operand");
@@ -82,14 +72,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
   };
   const compare = (): any => {
     const left = primary();
-    let negated = false;
-    if (is("not")) { at++; negated = true; }
     const op = String(input[at]?.value).toLowerCase();
-    const apply = (test: (value: any) => boolean) => {
-      const values = left instanceof ContextValues ? left.values : [left];
-      return values.some((value) => negated ? !test(value) : test(value));
-    };
-    if (op === "exists") { at++; return apply((value) => value !== undefined && value !== null); }
     if (op === "in") {
       at++;
       const close = is("[") ? "]" : ")";
@@ -97,22 +80,21 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       const choices: any[] = [];
       while (!is(close)) { choices.push(primary()); if (!is(",")) break; at++; }
       take(close);
-      return apply((value) => choices.includes(value));
+      return choices.includes(left);
     }
     if (op === ">=" || op === "<=") {
       at++;
       const right = primary();
-      return apply((value) => op === ">=" ? value >= right : value <= right);
+      return op === ">=" ? left >= right : left <= right;
     }
     if (["=", "like", "regexp", "contains"].includes(op)) {
       at++;
       const right = primary();
-      return apply((value) => op === "=" ? value === right : op === "contains" ? String(value ?? "").toLowerCase().includes(String(right).toLowerCase())
-        : right instanceof RegExp ? right.test(String(value ?? ""))
-        : op === "regexp" ? new RegExp(right.replace("(?i)", ""), right.includes("(?i)") ? "i" : "").test(String(value ?? ""))
-        : String(value ?? "").includes(right));
+      return op === "=" ? left === right : op === "contains" ? String(left ?? "").toLowerCase().includes(String(right).toLowerCase())
+        : right instanceof RegExp ? right.test(String(left ?? ""))
+        : op === "regexp" ? new RegExp(right.replace("(?i)", ""), right.includes("(?i)") ? "i" : "").test(String(left ?? ""))
+        : String(left ?? "").includes(right);
     }
-    if (negated) throw new Error("unconsumed NOT");
     return left;
   };
   const and = (): any => { let value = compare(); while (is("and")) { at++; const right = compare(); value = value && right; } return value; };

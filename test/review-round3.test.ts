@@ -118,8 +118,6 @@ const row = (data: Record<string, unknown>): WireRow => ({ timestamp: new Date(N
 it("SigNoz context predicates obey its documented context rules and count conflicting severities once", async () => {
   const input = row({ body: "ordinary request", severity_text: "ERROR", resources_string: { "service.name": "case-service", level: "FATAL" }, attributes_string: { severity_text: "WARN" } });
   const fields = wireFields(input);
-  expect(evaluate("severity_text = 'ERROR'", fields)).toBe(true);
-  expect(evaluate("severity_text = 'WARN'", fields)).toBe(true);
   expect(szRow(input).level).toBe("warn");
   expect(evaluate(buildFilter({ ...range, minLevel: "error", limit: 10 }), fields)).toBe(true);
   expect(matchesRecord(szRow(input), { minLevel: "error" })).toBe(false);

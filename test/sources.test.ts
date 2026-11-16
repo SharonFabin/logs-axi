@@ -68,8 +68,8 @@ describe("cloudwatch", () => {
 describe("signoz", () => {
   it("builds a v5 filter expression from the shared filters", () => {
     const filter = buildFilter({ ...range, service: "case-service", minLevel: "warn", limit: 1 });
-    expect(evaluate(filter, { "service.name": "case", severity_text: "WARNING" })).toBe(true);
-    expect(evaluate(filter, { "service.name": "case", severity_text: "NOTICE" })).toBe(false);
+    expect(evaluate(filter, { resource: { "service.name": "case" }, log: { severity_text: "WARNING" } })).toBe(true);
+    expect(evaluate(filter, { resource: { "service.name": "case" }, log: { severity_text: "NOTICE" } })).toBe(false);
     const trace = buildFilter({ ...range, id: "4BF92F3577B34DA6A3CE929D0E0E4736", limit: 1 });
     expect(evaluate(trace, { log: { trace_id: "4bf92f3577b34da6a3ce929d0e0e4736" } })).toBe(true);
     const request = buildFilter({ ...range, id: "req-1", limit: 1 });

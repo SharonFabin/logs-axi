@@ -92,7 +92,7 @@ const UPPER_WORD = String.raw`\p{Lu}{2,}`;
 const ci = (w: string) => w.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`);
 const NAME_LABEL = `(?:${["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full ?name", "first ?name", "last ?name", "name"].map(ci).join("|")})`;
 
-const labelledValue = (label: string, value: string) => new RegExp(String.raw`\b(?:${label})\s*[:=#]?\s*(?:"${value}"|'${value}'|${value})`, "gi");
+const labelledValue = (label: string, value: string) => new RegExp(String.raw`["']?\b(?:${label})["']?\s*[:=#]?\s*(?:"${value}"|'${value}'|${value})`, "gi");
 
 const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
   [/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "[email]"],
