@@ -1,0 +1,28 @@
+{
+  "//": "Copy to ~/.config/logs-axi/config.json (or point LOGS_AXI_CONFIG at it). No secrets here: SigNoz keys come from `logs-axi signoz login` (or LOGS_AXI_SIGNOZ_KEY).",
+  "sources": {
+    "cloudwatch": {
+      "dev": {
+        "//": "Placeholders: your AWS profile and log groups. Services are read from the JSON 'service' field, else the log stream prefix <service>/.",
+        "profile": "my-profile",
+        "region": "us-east-1",
+        "logGroups": ["/my-app/dev"]
+      },
+      "prod": {
+        "profile": "my-profile",
+        "region": "us-east-1",
+        "logGroups": ["/my-app/prod"]
+      }
+    },
+    "signoz": {
+      "dev": {
+        "//": "Your SigNoz endpoint (here a localhost port-forward on 3301). Store a viewer API key with `logs-axi signoz login --env dev`.",
+        "endpoint": "http://localhost:3301"
+      },
+      "prod": {
+        "//": "Same for prod on another local port, so both can be up at once.",
+        "endpoint": "http://localhost:3302"
+      }
+    }
+  }
+}
