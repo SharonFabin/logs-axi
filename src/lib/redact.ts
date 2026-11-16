@@ -174,14 +174,14 @@ function labelledValues(text: string): string {
   return out + text.slice(from);
 }
 
-function maskFragment(text: string): string {
-  const stack = [{ key: "", safe: false }];
+function maskFragment(text: string, stats: RedactStats): string {
+  const stack = [{ key: "" }];
   let key = "";
   return text.replace(/(["'])(?:\\[\s\S]?|(?<=\p{L})\1(?=\p{L})|(?!\1)[^\\])*\1?|[{}\[\],:]|[^{}\[\],:"'\r\n]+/gu, (token, quote: string | undefined, at: number) => {
     const parent = stack.at(-1)!;
     if (!token.trim() || token === ":") return token;
     if (token === "{" || token === "[") {
-      stack.push({ key: key || parent.key, safe: parent.safe || isOperationalId(key) || FRAGMENT_STRUCTURAL.has(normalizeKey(key)) });
+      stack.push({ key: key || parent.key });
       key = "";
       return token;
     }
@@ -190,9 +190,16 @@ function maskFragment(text: string): string {
     if (/^\s*:/.test(text.slice(at + token.length))) {
       key = quote ? token.slice(1, token.endsWith(quote) ? -1 : undefined) : token.trim();
       if (quote === '"') { try { key = JSON.parse(token); } catch {} }
-      return token;
+      const masked = isPatientField(key) || isOperationalId(key) ? key : maskText(key, stats);
+      return masked === key ? token : JSON.stringify(masked);
     }
-    if (parent.safe || isOperationalId(key) || FRAGMENT_STRUCTURAL.has(normalizeKey(key))) return token;
+    if (isOperationalId(key)) return token;
+    if (FRAGMENT_STRUCTURAL.has(normalizeKey(key))) {
+      let value = quote ? token.slice(1, token.endsWith(quote) ? -1 : undefined) : token;
+      if (quote === '"') { try { value = JSON.parse(token); } catch {} }
+      const masked = maskText(value, stats);
+      return quote ? JSON.stringify(masked) : masked;
+    }
     const kind = patientFieldKind(key) ?? patientFieldKind(parent.key);
     if (quote || kind || !/^(?:true|false|null|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)$/i.test(token.trim())) return JSON.stringify(`[${kind ?? "redacted"}]`);
     return token.replace(/[-+]?\b\d{5,}(?:\.\d+)?(?:e[+-]?\d+)?\b/gi, '"[redacted]"');
@@ -240,10 +247,25 @@ export function maskText(text: string, stats: RedactStats = { droppedFields: 0 }
   };
   const start = text.search(/[\[{]/);
   if (start < 0) return mask(text);
-  let value: unknown;
-  try { value = JSON.parse(text.slice(start)); }
-  catch { return mask(text.slice(0, start)) + maskFragment(text.slice(start)); }
-  return mask(text.slice(0, start)) + JSON.stringify(redactValue(value, stats));
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let end = start; end < text.length; end++) {
+    const c = text[end];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') quoted = false;
+    } else if (c === '"') quoted = true;
+    else if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") depth--;
+    if (depth !== 0 || quoted) continue;
+    let value: unknown;
+    try { value = JSON.parse(text.slice(start, end + 1)); }
+    catch { break; }
+    return mask(text.slice(0, start)) + JSON.stringify(redactValue(value, stats)) + maskText(text.slice(end + 1), stats);
+  }
+  return mask(text.slice(0, start)) + maskFragment(text.slice(start), stats);
 }
 
 export interface RedactStats {
@@ -270,7 +292,7 @@ export function redactObject(obj: Record<string, unknown>, stats: RedactStats): 
     let key = base;
     let suffix = 2;
     while (Object.hasOwn(out, key)) key = `${base}#${suffix++}`;
-    Object.defineProperty(out, key, { value: operational || STRUCTURAL.has(k) && typeof v === "string" && !/^[\s]*[\[{"]/.test(v) ? v : redactValue(v, stats), enumerable: true, configurable: true, writable: true });
+    Object.defineProperty(out, key, { value: operational && (v === null || typeof v !== "object") ? v : redactValue(v, stats), enumerable: true, configurable: true, writable: true });
   }
   return out;
 }

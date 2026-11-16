@@ -151,9 +151,9 @@ it.each(["ssns", "mrns", "memberIds", "names", "medications", "diagnoses", "unkn
   expect(output).toContain('"requestId":"1234567890"');
 });
 
-it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id", "residentId", "patientId", "orgId", "facilityId"])("never applies patient heuristics to approved %s values", (key) => {
+it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id", "residentId", "patientId", "orgId", "facilityId"])("never applies patient heuristics to approved %s scalars", (key) => {
   for (const spelling of [key, `${key}s`, key.replace(/Id$/, "_id"), `${key.replace(/Id$/, "_id")}s`]) {
-    for (const value of ["1234567890", "123-45-6789", "Jane Testperson", ["1234567890", "SSN: 123456789", "Jane Testperson"]]) {
+    for (const value of ["1234567890", "123-45-6789", "Jane Testperson", 1234567890, null, true]) {
       const fields = { [spelling]: value };
       expect(redactObject(fields, { droppedFields: 0 })).toEqual(fields);
       const json = JSON.stringify(fields);
@@ -162,6 +162,48 @@ it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id",
     }
   }
   expect(redactRecord({ time: "t", level: "error", service: "case-service", msg: "failed", fields: { [key]: "1234567890" } }, { droppedFields: 0 }).fields[key]).toBe("1234567890");
+});
+
+it.each(["msg", "message", "service", "level", "time", "details"])("redacts patient text under non-operational %s fields", (key) => {
+  const fields = { [key]: "ssn: 123456789", requestId: "1234567890" };
+  expect(redactObject(fields, { droppedFields: 0 })).toEqual({ [key]: "[ssn]", requestId: "1234567890" });
+  const json = JSON.stringify(fields);
+  for (const input of [`failed ${json}`, `failed ${json.slice(0, -1)}`, `failed ${json} retry`]) {
+    const output = maskText(input);
+    expect(output.replace('"requestId":"1234567890"', "")).not.toContain("123456789");
+    expect(output).toContain('"requestId":"1234567890"');
+  }
+});
+
+it("redacts the reported message fragment and embedded name-keyed map", () => {
+  expect(maskText('failed {"message":"ssn: 123456789"')).toBe('failed {"message":"[ssn]"');
+  expect(maskText('failed {"byResident":{"Jane Testperson":3}} retry')).toBe('failed {"byResident":{"[name]":3}} retry');
+  expect(maskText('failed {"byResident":{"Jane Testperson":3')).toBe('failed {"byResident":{"[name]":3');
+});
+
+it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id", "residentId", "patientId", "orgId", "facilityId", "caseIds", "resident_ids"])("recursively redacts containers owned by %s", (key) => {
+  const nested = { ssn: "123456789", message: "patient: Jane Testperson", byResident: { "Jane Testperson": 3 }, requestId: "1234567890" };
+  const clean = { message: "patient: [name]", byResident: { "[name]": 3 }, requestId: "1234567890" };
+  for (const [value, expected] of [[nested, clean], [[nested], [clean]], [[[nested]], [[clean]]]]) {
+    const fields = { [key]: value };
+    expect(redactObject(fields, { droppedFields: 0 })).toEqual({ [key]: expected });
+    const json = JSON.stringify(fields);
+    expect(maskText(`failed ${json} retry`)).toBe(`failed ${JSON.stringify({ [key]: expected })} retry`);
+    const fragment = maskText(`failed ${json.slice(0, -1)}`);
+    for (const token of ["123456789", "Jane", "Testperson"]) expect(fragment.replace('"requestId":"1234567890"', "")).not.toContain(token);
+    expect(fragment).toContain('"requestId":"1234567890"');
+  }
+  const fields = { [key]: ["1234567890", "Jane Testperson"] };
+  expect(redactObject(fields, { droppedFields: 0 })).toEqual({ [key]: ["[phone]", "[name]"] });
+  expect(maskText(JSON.stringify(fields))).toBe(JSON.stringify({ [key]: ["[phone]", "[name]"] }));
+  const fragment = maskText(JSON.stringify(fields).slice(0, -1));
+  expect(fragment).not.toMatch(/1234567890|Jane|Testperson/);
+});
+
+it("redacts each complete embedded container and its surrounding text", () => {
+  expect(maskText('failed {"ssn":"123456789","caseId":"case-1"} retry [{"byResident":{"Jane Testperson":3}}] ssn: 987654321')).toBe('failed {"caseId":"case-1"} retry [{"byResident":{"[name]":3}}] [ssn]');
+  const json = JSON.stringify({ message: 'failed at {"ssn":"123456789"} for Jane Testperson', caseId: "case-1" });
+  expect(maskText(`${json} retry`)).toBe('{"message":"failed at {} for [name]","caseId":"case-1"} retry');
 });
 
 it.each(["cloudwatch", "signoz"] as const)("%s error samples retain numeric operational IDs for follow-up traces", async (source) => {
