@@ -29,13 +29,14 @@ help[2]:
 
 ```bash
 npm install -g github:SharonFabin/logs-axi
-mkdir -p ~/.config/logs-axi && cp "$(npm root -g)/logs-axi/config.example.json" ~/.config/logs-axi/config.json
+config_file="${LOGS_AXI_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/logs-axi/config.json}"
+mkdir -p "$(dirname "$config_file")" && cp "$(npm root -g)/logs-axi/config.example.json" "$config_file"
 logs-axi signoz login   # SigNoz viewer key: hidden prompt, stored per user
 logs-axi                # shows what is configured
 ```
 
-The config (`$LOGS_AXI_CONFIG`, else `$XDG_CONFIG_HOME/logs-axi/config.json` when
-`XDG_CONFIG_HOME` is set, else `~/.config/logs-axi/config.json`) maps
+The config (`$LOGS_AXI_CONFIG` when nonempty, else `$XDG_CONFIG_HOME/logs-axi/config.json`
+when `XDG_CONFIG_HOME` is nonempty, else `~/.config/logs-axi/config.json`) maps
 `sources.<source>.<env>` to that source's settings. The example ships the Point360
 values: CloudWatch log groups `/point360/dev` and `/point360/prod` in us-east-1 through
 the `Point360-Admin` profile, and SigNoz on the local end of each environment's SSM
@@ -44,7 +45,7 @@ port-forward. No secrets live in it:
 | source | settings | credentials |
 |---|---|---|
 | `cloudwatch` | `region`, `logGroups[]`, `profile` | the AWS profile (`aws sso login --profile ...`) |
-| `signoz` | `endpoint` | a viewer API key: `$LOGS_AXI_SIGNOZ_KEY`, else the credentials file `logs-axi signoz login` writes |
+| `signoz` | `endpoint` | a viewer API key; see [SigNoz login](#signoz-login) |
 
 SigNoz has no public port: run `terraform output -raw signoz_ui_command` in
 `infra/aws/environments/<env>` of the monorepo to forward it (dev on 3301, prod on 3302
@@ -63,9 +64,13 @@ environment only; without it the key serves every environment. Piped input works
 | Linux, macOS | `$XDG_CONFIG_HOME/logs-axi/credentials`, else `~/.config/logs-axi/credentials` (file `0600`, directory `0700`) |
 | Windows | `%APPDATA%\logs-axi\credentials` (protected by the profile's ACLs) |
 
-SigNoz commands use `$LOGS_AXI_SIGNOZ_KEY` when it is set, else the file's key for that
+SigNoz commands use `$LOGS_AXI_SIGNOZ_KEY` when nonempty, else the file's key for that
 environment, else its all-environments key. With neither, they print a one-line hint to
 run `logs-axi signoz login`. No OS keychain integration.
+
+Credential updates replace the file atomically, preserving existing keys if writing
+the replacement fails. If the file contains invalid JSON, login replaces it with only
+the newly entered key; run login again for any other environment or default keys.
 
 **Live status (v1):** the CloudWatch adapter is verified read-only against dev and prod.
 The SigNoz adapter is untested against a live server, pending a viewer API key: its
@@ -118,7 +123,8 @@ On by default (`src/lib/redact.ts`):
   numbers, NPI, drugs, diagnoses, allergies, room/bed. Ids (`caseId`, `residentId`,
   uuids), counts and service names stay. The output says how many fields were dropped.
 - **Free text** (messages and non-structural field keys and string values) is masked:
-  emails, phones, SSNs, DOBs, MRNs, member/Rx numbers, rooms, titled names (`Dr [name]`),
+  emails, phones, dashed SSNs, labelled nine-digit SSNs or social-security numbers,
+  DOBs, MRNs, member/Rx numbers, rooms, titled names (`Dr [name]`),
   labelled names (`resident: [name]`), `Last, First`, and runs of capitalized words that
   are not common log vocabulary. Structural string fields such as service names and trace/request IDs
   are preserved. JSON objects and arrays embedded in messages and non-structural

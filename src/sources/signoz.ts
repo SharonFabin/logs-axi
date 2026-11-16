@@ -54,15 +54,21 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
       });
     }
     if (!res.ok) {
-      throw new AxiError(`signoz: HTTP ${res.status}: ${maskText(text).slice(0, 300)}`, {
+      throw new AxiError(`signoz: HTTP ${res.status}: ${maskText(text.replaceAll(key, "[api-key]")).slice(0, 300)}`, {
         help: res.status === 401 || res.status === 403 ? [`the key was rejected: run \`logs-axi signoz login\` (or check ${KEY_ENV})`] : [],
       });
     }
+    let payload;
     try {
-      return JSON.parse(text);
+      payload = JSON.parse(text);
     } catch {
       throw new AxiError("signoz: response is not valid JSON");
     }
+    if (payload?.status && payload.status !== "success") {
+      const diagnostic = JSON.stringify(payload.error ?? payload.status).replaceAll(key, "[api-key]");
+      throw new AxiError(`signoz: ${maskText(diagnostic).slice(0, 300)}`);
+    }
+    return payload;
   };
 }
 

@@ -2,7 +2,6 @@
  * Minimal flag parser enforcing AXI principle #6:
  * - unknown flags are rejected by name, with the valid set listed inline
  * - --help always passes
- * - no interactive prompts; everything comes from flags
  */
 import { usageError } from "./errors.js";
 
@@ -75,4 +74,3 @@ export function parseArgs(argv: string[], schema: FlagSchema, commandLabel: stri
 
   return { positionals, flags, help };
 }
-

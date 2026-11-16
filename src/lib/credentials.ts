@@ -1,12 +1,8 @@
 /**
- * The per-user credentials file `logs-axi signoz login` writes:
- *   Linux/macOS: $XDG_CONFIG_HOME/logs-axi/credentials, else ~/.config/logs-axi/credentials
- *                (file 0600, directory 0700)
- *   Windows:     %APPDATA%\logs-axi\credentials (profile ACLs; no chmod)
+ * Per-user credential setup and lookup: README.md#signoz-login.
  * Contents: { "signoz": { "default": "<key>", "envs": { "<env>": "<key>" } } }
  *
- * Lookup for a SigNoz env: $LOGS_AXI_SIGNOZ_KEY, then the file's key for that env,
- * then its default. Keys are never printed, logged or taken from argv.
+ * Keys are never printed, logged or taken from argv.
  */
 import fs from "node:fs";
 import os from "node:os";
