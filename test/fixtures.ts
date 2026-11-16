@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { evaluate, insightsFields } from "./query-contract.js";
 /**
  * Synthetic log events and the raw API responses each source would return for them.
@@ -104,11 +105,6 @@ export function cloudwatchResults(evs: Event[]) {
   };
 }
 
-/** Logs Insights results for the services stats query. */
-export function cloudwatchServiceStats(evs: Event[]) {
-  return { results: [[{ field: "n", value: String(evs.length) }]], status: "Complete" };
-}
-
 const SEVERITY: Record<string, number> = { debug: 5, info: 9, warn: 13, error: 17 };
 
 /** SigNoz v5 query_range raw response, the shape the OTel log bridge produces. */
@@ -137,7 +133,7 @@ export function signozRaw(evs: Event[]) {
                   attributes_number: numbers,
                   attributes_string: strings,
                   body: e.msg,
-                  id: `2pXk${hex(rng(i + 3), 23)}`,
+                  id: createHash("sha256").update(JSON.stringify(e)).digest("hex").slice(0, 27),
                   resources_string: {
                     "service.name": e.service,
                     "deployment.environment": "dev",
@@ -165,31 +161,6 @@ export function signozRaw(evs: Event[]) {
   };
 }
 
-/** SigNoz v5 scalar response for count() by service.name, severity_text. */
-export function signozServiceStats(evs: Event[], specs: any[]) {
-  return {
-    status: "success",
-    data: { type: "scalar", data: { results: specs.map((spec) => {
-      if (spec.groupBy.some((field: any) => field.fieldContext === "body")) throw new Error("body fields can be filtered but not selected or grouped on a string-body store");
-      const counts = new Map<string, { values: unknown[]; count: number }>();
-      for (const e of evs) {
-        const fields = signozFields(e);
-        if (spec.filter?.expression && !evaluate(spec.filter.expression, fields)) continue;
-        const values = spec.groupBy.map((g: any) => evaluate(`${g.fieldContext}.${g.name}`, fields) ?? "");
-        const key = JSON.stringify(values);
-        const group = counts.get(key) ?? { values, count: 0 };
-        group.count++;
-        counts.set(key, group);
-      }
-      return {
-        queryName: spec.name,
-        columns: [...spec.groupBy.map((g: any) => ({ name: g.name, fieldContext: g.fieldContext, columnType: "group" })), { name: "n", columnType: "aggregation" }],
-        data: [...counts.values()].map((group) => [...group.values, group.count]),
-      };
-    }) } },
-  };
-}
-
 /**
  * Stub transports: answer each request from `evs`, applying the request's own filter
  * crudely (level, service, text, id), the way the real service would. They also record
@@ -214,12 +185,8 @@ export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], res
         return { queryId: "q-1" };
       }
       const q = last!.queryString;
-      let res: unknown;
-      if (q.includes("stats count(*)")) res = cloudwatchServiceStats(evs);
-      else {
-        const selected = evs.filter((e) => insightsFields(q, { ...JSON.parse(line(e)), "@message": line(e), "@logStream": `${e.service.replace(/-service$/, "")}/container/task` }));
-        res = cloudwatchResults(newest(selected, last!.limit));
-      }
+      const selected = evs.filter((e) => insightsFields(q, { ...JSON.parse(line(e)), "@message": line(e), "@logStream": `${e.service.replace(/-service$/, "")}/container/task` }));
+      const res = cloudwatchResults(newest(selected, last!.limit));
       rec.responses.push(res);
       return res;
     },
@@ -235,13 +202,9 @@ export function signozStub(evs: Event[], rec: Recorder = { requests: [], respons
   return Object.assign(
     async (_path: string, body: any) => {
       rec.requests.push(body);
-      let res: unknown;
-      if (body.requestType === "scalar") res = signozServiceStats(evs, body.compositeQuery.queries.map((q: any) => q.spec));
-      else {
-        const spec = body.compositeQuery.queries[0].spec;
-        const expr: string = spec.filter.expression;
-        res = signozRaw(newest(evs.filter((e) => !expr || evaluate(expr, signozFields(e))), spec.limit, spec.offset ?? 0));
-      }
+      const spec = body.compositeQuery.queries[0].spec;
+      const expr: string = spec.filter.expression;
+      const res = signozRaw(newest(evs.filter((e) => !expr || evaluate(expr, signozFields(e))), spec.limit, spec.offset ?? 0));
       rec.responses.push(res);
       return res;
     },

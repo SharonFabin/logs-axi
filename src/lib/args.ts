@@ -77,16 +77,3 @@ export function parseArgs(argv: string[], schema: FlagSchema, commandLabel: stri
   return { positionals, flags, help };
 }
 
-/** Read a string flag or throw a usage error if required and missing. */
-export function requireString(
-  parsed: ParsedArgs,
-  name: string,
-  commandLabel: string,
-  example: string,
-): string {
-  const v = parsed.flags[name];
-  if (typeof v !== "string" || v.length === 0) {
-    throw usageError(`--${name} is required`, [example]);
-  }
-  return v;
-}

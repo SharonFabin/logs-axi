@@ -71,28 +71,6 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     const t = input[at++];
     if (!t) throw new Error("missing query operand");
     if (t.kind === "literal") return t.value;
-    if (is("(")) {
-      at++;
-      const args: any[] = [];
-      while (!is(")")) {
-        args.push(or());
-        if (!is(",")) break;
-        at++;
-      }
-      take(")");
-      switch (t.value.toLowerCase()) {
-        case "case": {
-          if (Math.floor(args.length / 2) > 10) throw new Error("CloudWatch case supports at most 10 branches");
-          for (let i = 0; i + 1 < args.length; i += 2) if (args[i]) return args[i + 1];
-          return args.length % 2 ? args.at(-1) : undefined;
-        }
-        case "coalesce": return args.find((v) => v !== undefined && v !== null);
-        case "tolower": return typeof args[0] === "string" ? args[0].toLowerCase() : undefined;
-        case "isempty": return args[0] === undefined || args[0] === null || args[0] === "" ? 1 : 0;
-        case "ispresent": return args[0] !== undefined && args[0] !== null;
-        default: throw new Error(`unknown query function ${t.value}`);
-      }
-    }
     return lookup(t.value);
   };
   const compare = (): any => {
@@ -133,15 +111,8 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
 }
 
 export function insightsFields(query: string, fields: Record<string, unknown>): Record<string, unknown> | undefined {
-  const out = { ...fields };
   for (const line of query.split("\n")) {
-    const parse = /^\| parse (@\w+) \/(.*)\/$/.exec(line);
-    if (parse) Object.assign(out, new RegExp(parse[2]!).exec(String(out[parse[1]!] ?? ""))?.groups);
-    if (line.startsWith("| fields ")) {
-      const assignment = /^\| fields (.*) as (\w+)$/.exec(line);
-      if (assignment && !assignment[1]!.includes(" as ")) out[assignment[2]!] = evaluate(assignment[1]!, out);
-    }
-    if (line.startsWith("| filter ") && !evaluate(line.slice(9), out)) return undefined;
+    if (line.startsWith("| filter ") && !evaluate(line.slice(9), fields)) return undefined;
   }
-  return out;
+  return fields;
 }

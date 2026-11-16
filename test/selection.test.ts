@@ -17,18 +17,7 @@ function signozWire(rows: Row[]) {
     expect(path).toBe("/api/v5/query_range");
     requests.push(request);
     const results = request.compositeQuery.queries.map(({ spec }: any) => {
-      if (request.requestType === "scalar") {
-        if (spec.groupBy.some((key: any) => key.fieldContext === "body")) throw new Error("body fields can be filtered but not selected or grouped on a string-body store");
-        const groups = new Map<string, { values: unknown[]; count: number }>();
-        for (const r of rows) {
-          const values = spec.groupBy.map((key: any) => evaluate(`${key.fieldContext}.${key.name}`, fields(r)) ?? null);
-          const id = JSON.stringify(values);
-          const group = groups.get(id) ?? { values, count: 0 };
-          group.count++;
-          groups.set(id, group);
-        }
-        return { queryName: spec.name, columns: [...spec.groupBy.map((key: any) => ({ ...key, columnType: "group" })), { name: "n", columnType: "aggregation" }], data: [...groups.values()].slice(0, spec.limit).map((group) => [...group.values, group.count]) };
-      }
+      expect(request.requestType).toBe("raw");
       const expression = spec.filter.expression;
       let candidates = candidateSets.get(expression);
       if (!candidates) {
@@ -50,7 +39,6 @@ function cloudwatchWire(rows: Row[], stream = "case/container/task") {
       requests.push(last);
       return { queryId: "test-query" };
     }
-    if (last.queryString.includes("stats count(*)")) return { status: "Complete", results: [[{ field: "n", value: String(rows.length) }]] };
     const selected = rows.filter((r) => {
       let data = {};
       try { data = JSON.parse(r.data.body); } catch {}
@@ -71,6 +59,25 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
     const wire = signozWire(rows);
     return { ...wire, source: signoz({ endpoint: "http://x" }, "test", wire.transport) };
   };
+  it.each([1, 50])("requests only %i rows when no client filter can reject them", async (limit) => {
+    const test = create(Array.from({ length: 200 }, (_, i) => row({ level: "info", msg: `line-${i}` }, i)));
+    const result = await test.source.query({ ...range, limit });
+    expect(result.rows).toHaveLength(limit);
+    expect(result.partial).toBe(false);
+    expect(test.requests).toHaveLength(1);
+    const sent = provider === "cloudwatch" ? test.requests[0] : test.requests[0].compositeQuery.queries[0].spec;
+    expect(sent.limit).toBe(limit);
+  });
+  it("counts 1000 services completely using only the normalized sample", async () => {
+    const input = Array.from({ length: 1000 }, (_, i) => row({ service: `service-${i}`, level: "error", msg: "failed" }, i));
+    const test = create(input);
+    const result = await test.source.serviceCounts(range);
+    expect(result.partial).toBe(false);
+    expect(result.rows).toHaveLength(1000);
+    expect(result.rows.every((item) => item.count === 1 && item.level === "error")).toBe(true);
+    expect(test.requests).toHaveLength(provider === "cloudwatch" ? 1 : 2);
+    if (provider === "signoz") expect(test.requests.every((request) => request.requestType === "raw")).toBe(true);
+  });
   it.each([50, false, null, "", [], {}])("ignores a non-string/empty level, severity, message or service override: %j", async (invalid) => {
     const bodies = [
       { level: invalid, severity: "ERROR", msg: "request" },
@@ -135,12 +142,56 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
   });
 });
 
-it("SigNoz string-body stores reject body grouping but still count normalized body services", async () => {
+it("SigNoz counts normalized body services using only raw requests", async () => {
   const input = [row({ service: "case", level: 50, msg: "failed" }, 0, { severity_text: "ERROR", resources_string: { "service.name": "shared" } }), row({ service: "ehr", level: false, msg: "failed" }, 1, { severity_text: "ERROR", resources_string: { "service.name": "shared" } })];
   const wire = signozWire(input);
-  await expect(wire.transport("/api/v5/query_range", { requestType: "scalar", compositeQuery: { queries: [{ spec: { name: "A", groupBy: [{ name: "service", fieldContext: "body" }], limit: 1000 } }] } })).rejects.toThrow("not selected or grouped");
   const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
   expect(await source.serviceCounts(range)).toEqual({ rows: [{ service: "case", level: "error", count: 1 }, { service: "ehr", level: "error", count: 1 }], partial: false });
+  expect(wire.requests).toHaveLength(1);
+});
+
+it("CloudWatch trace follows IDs anywhere in the wire line while honoring level and service", async () => {
+  const input = [
+    row("Error handling request req-123", 0),
+    row({ level: "error", service: "case", msg: "failed req-123" }, 1),
+    row({ level: "error", service: "case", msg: "nested match", diagnostic: { request: "req-123" } }, 2),
+    row({ level: "warn", service: "case", msg: "warning req-123" }, 3),
+    row({ level: "error", service: "other", msg: "other req-123" }, 4),
+    row({ level: "error", service: "case", msg: "unrelated req-456" }, 5),
+  ];
+  const wire = cloudwatchWire(input);
+  const result = await run(["cloudwatch", "dev", "trace", "req-123", "--level", "error", "--service", "case", "--json"], { config: TEST_CONFIG, now: NOW, transports: { cloudwatch: wire.transport } });
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.out).lines.map((line: any) => line.msg)).toEqual(["nested match", "failed req-123", "Error handling request req-123"]);
+});
+
+it("CloudWatch trace uses its requested limit for provider-only substring matching", async () => {
+  const wire = cloudwatchWire([row("request 4bf92f3577b34da6a3ce929d0e0e4736 completed")]);
+  const source = cloudwatch(config, "test", wire.transport);
+  const result = await source.query({ ...range, id: "4BF92F3577B34DA6A3CE929D0E0E4736", limit: 1 });
+  expect(result.rows).toHaveLength(1);
+  expect(wire.requests).toHaveLength(1);
+  expect(wire.requests[0].limit).toBe(1);
+});
+
+it("SigNoz counts each provider ID once when a late arrival shifts the next offset page", async () => {
+  const initial = Array.from({ length: 1000 }, (_, i) => row({ id: "application-id", service: "case", level: i === 999 ? "error" : "warn", severity: "error", msg: "same payload" }, i));
+  const tail = row({ id: "application-id", service: "case", level: "warn", severity: "error", msg: "same payload" }, 1000);
+  const transport = async (_path: string, request: any) => {
+    expect(request.requestType).toBe("raw");
+    const spec = request.compositeQuery.queries[0].spec;
+    expect(spec.limit).toBe(1000);
+    expect([0, 1000]).toContain(spec.offset);
+    return { status: "success", data: { data: { results: [{ rows: spec.offset === 0 ? initial : [initial[999], tail] }] } } };
+  };
+  const source = signoz({ endpoint: "http://x" }, "test", transport);
+  const all = await source.query({ ...range, limit: 1002 });
+  expect(all.partial).toBe(false);
+  expect(all.rows).toHaveLength(1001);
+  const errors = await source.query({ ...range, minLevel: "error", limit: 1002 });
+  expect(errors.partial).toBe(false);
+  expect(errors.rows).toHaveLength(1);
+  expect(await source.serviceCounts(range)).toEqual({ rows: [{ service: "case", level: "warn", count: 1000 }, { service: "case", level: "error", count: 1 }], partial: false });
 });
 
 it.each(["level", "severity", "severity_text"])("SigNoz ignores numeric/boolean attribute.%s before using native severity", async (field) => {

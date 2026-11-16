@@ -75,11 +75,7 @@ const lit = (s: string, like = false) =>
   "'" + (like ? s.replace(/[\\%_]/g, "\\$&") : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
 
 const LEVEL_FIELDS = ["body.level", "body.severity", "body.severity_text", "attribute.level", "attribute.severity", "attribute.severity_text", "log.severity_text"];
-const SERVICE_FIELDS = [
-  { name: "service.name", fieldContext: "resource" },
-  { name: "service", fieldContext: "attribute" },
-];
-const SERVICE_FILTER_FIELDS = ["body.service", ...SERVICE_FIELDS.map((field) => `${field.fieldContext}.${field.name}`)];
+const SERVICE_FILTER_FIELDS = ["body.service", "resource.service.name", "attribute.service"];
 const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
 
 /** The v5 filter expression for a LogQuery. Exported for tests. */
@@ -130,32 +126,8 @@ export function rawRequest(q: LogQuery, offset = 0): unknown {
   };
 }
 
-export function servicesRequest(range: TimeRange): unknown {
-  return {
-    schemaVersion: "v1",
-    start: range.start,
-    end: range.end,
-    requestType: "scalar",
-    compositeQuery: {
-      queries: [{
-        type: "builder_query",
-        spec: {
-          name: "A",
-          signal: "logs",
-          aggregations: [{ expression: "count()", alias: "n" }],
-          groupBy: SERVICE_FIELDS,
-          order: [{ key: { name: "count()" }, direction: "desc" }],
-          limit: 1000,
-        },
-      }],
-    },
-  };
-}
-
 interface V5Result {
   rows?: { timestamp?: unknown; data?: Record<string, unknown> }[] | null;
-  columns?: { columnType?: string }[];
-  data?: unknown[][] | null;
 }
 
 function results(payload: unknown): V5Result[] {
@@ -199,13 +171,19 @@ class SignozSource implements Source {
     if (q.service && !SAFE_TOKEN.test(q.service)) throw new AxiError(`invalid service name \`${q.service}\``, { exitCode: 2 });
     if (q.id && !SAFE_TOKEN.test(q.id)) throw new AxiError(`invalid id \`${q.id}\``, { exitCode: 2 });
     const rows: LogRecord[] = [];
-    const pageSize = Math.min(1000, Math.max(100, q.limit));
+    const seen = new Set<string>();
+    const pageSize = Math.min(1000, q.minLevel || q.service || q.id ? Math.max(100, q.limit) : q.limit);
     let offset = 0;
     while (offset < MAX_SCAN) {
       const limit = Math.min(pageSize, MAX_SCAN - offset);
       const page = results(await this.request("/api/v5/query_range", rawRequest({ ...q, limit }, offset))).flatMap((result) => result.rows ?? []);
       offset += page.length;
       for (const row of page) {
+        const id = str(row.data?.id);
+        if (id) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+        }
         const record = parseRow(row);
         if (matchesRecord(record, q)) rows.push(record);
         if (rows.length === q.limit) return { rows, partial: false };
@@ -216,15 +194,7 @@ class SignozSource implements Source {
   }
 
   async serviceCounts(range: TimeRange): Promise<QueryResult<ServiceCount>> {
-    const groups = results(await this.request("/api/v5/query_range", servicesRequest(range)));
-    let total = 0;
-    let partial = false;
-    for (const result of groups) {
-      const count = (result.columns ?? []).findIndex((column) => column.columnType === "aggregation");
-      for (const row of result.data ?? []) total += Number(row[count] ?? 0);
-      if ((result.data?.length ?? 0) >= 1000) partial = true;
-    }
     const sample = await this.query({ ...range, limit: MAX_SCAN });
-    return { rows: countServices(sample.rows), partial: partial || sample.partial || total > sample.rows.length || sample.rows.length >= MAX_SCAN };
+    return { rows: countServices(sample.rows), partial: sample.partial || sample.rows.length >= MAX_SCAN };
   }
 }

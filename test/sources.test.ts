@@ -39,7 +39,7 @@ describe("cloudwatch", () => {
     const src = cloudwatch({ region: "us-east-1", logGroups: ["/point360/dev"] }, "t", async (cmd: any) => {
       seen.push(cmd.constructor.name);
       if (cmd.constructor.name === "StartQueryCommand") {
-        expect(cmd.input).toMatchObject({ logGroupNames: ["/point360/dev"], startTime: 1000, endTime: 2000, limit: 10_000 });
+        expect(cmd.input).toMatchObject({ logGroupNames: ["/point360/dev"], startTime: 1000, endTime: 2000, limit: 5 });
         return { queryId: "q" };
       }
       return ++polls < 2 ? { status: "Running" } : { status: "Complete", results: [] };

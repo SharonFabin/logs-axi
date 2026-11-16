@@ -13,7 +13,7 @@ import {
 } from "@aws-sdk/client-cloudwatch-logs";
 import { AxiError } from "../lib/errors.js";
 import { maskText } from "../lib/redact.js";
-import { ID_FIELDS, INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
+import { INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface CloudWatchEnv {
@@ -81,10 +81,7 @@ export function buildQuery(q: LogQuery): string {
   }
   if (q.text) filters.push(`@message like /(?i)${reEscape(q.text)}/`);
   if (q.id) {
-    const hex = /^[0-9a-f]{32}$/i.test(q.id);
-    const ids = ID_FIELDS.map((field) => hex ? `${field} like /(?i)^${q.id}$/` : `${field} = ${JSON.stringify(q.id)}`);
-    ids.push(hex ? `@message like /(?i)${q.id}/` : `@message like ${JSON.stringify(q.id)}`);
-    filters.push("(" + ids.join(" or ") + ")");
+    filters.push(/^[0-9a-f]{32}$/i.test(q.id) ? `@message like /(?i)${q.id}/` : `@message like ${JSON.stringify(q.id)}`);
   }
   return [
     "fields @timestamp, @message, @logStream",
@@ -93,8 +90,6 @@ export function buildQuery(q: LogQuery): string {
     `| limit ${q.limit}`,
   ].join("\n");
 }
-
-export const SERVICES_QUERY = "stats count(*) as n";
 
 const fieldOf = (row: ResultField[], name: string) => row.find((f) => f.field === name)?.value;
 
@@ -144,15 +139,14 @@ class CloudWatchSource implements Source {
   async query(q: LogQuery): Promise<QueryResult<LogRecord>> {
     if (q.service && !SAFE_TOKEN.test(q.service)) throw new AxiError(`invalid service name \`${q.service}\``, { exitCode: 2 });
     if (q.id && !SAFE_TOKEN.test(q.id)) throw new AxiError(`invalid id \`${q.id}\``, { exitCode: 2 });
-    const candidates = await this.run(buildQuery({ ...q, limit: MAX_SCAN }), q, MAX_SCAN);
-    const selected = candidates.map(parseRow).filter((record) => matchesRecord(record, q));
+    const limit = q.minLevel || q.service ? MAX_SCAN : Math.min(q.limit, MAX_SCAN);
+    const candidates = await this.run(buildQuery({ ...q, limit }), q, limit);
+    const selected = candidates.map(parseRow).filter((record) => matchesRecord(record, { minLevel: q.minLevel, service: q.service }));
     return { rows: selected.slice(0, q.limit), partial: candidates.length >= MAX_SCAN && selected.length < q.limit };
   }
 
   async serviceCounts(range: TimeRange): Promise<QueryResult<ServiceCount>> {
-    const totals = await this.run(SERVICES_QUERY, range, 1);
-    const total = Number(fieldOf(totals[0] ?? [], "n") ?? 0);
     const sample = await this.query({ ...range, limit: MAX_SCAN });
-    return { rows: countServices(sample.rows), partial: sample.partial || total > sample.rows.length || sample.rows.length >= MAX_SCAN };
+    return { rows: countServices(sample.rows), partial: sample.partial || sample.rows.length >= MAX_SCAN };
   }
 }

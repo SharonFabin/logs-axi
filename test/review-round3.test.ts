@@ -86,26 +86,13 @@ describe("credential diagnostics", () => {
 
 type WireRow = { timestamp: string; data: Record<string, any> };
 const wireFields = (row: WireRow) => ({ attribute: row.data.attributes_string ?? {}, resource: row.data.resources_string ?? {}, log: { body: row.data.body, severity_text: row.data.severity_text, trace_id: row.data.trace_id } });
-const serviceKeys = [
-  { name: "service.name", fieldContext: "resource", fieldDataType: "string" },
-  { name: "service", fieldContext: "attribute", fieldDataType: "string" },
-];
 function wireTransport(rows: WireRow[]) {
   return async (path: string, request: any) => {
     expect(path).toBe("/api/v5/query_range");
     const results = request.compositeQuery.queries.map(({ spec }: any) => {
       const selected = rows.filter((row) => !spec.filter?.expression || evaluate(spec.filter.expression, wireFields(row)));
-      if (request.requestType === "raw") return { queryName: spec.name, rows: selected.slice(spec.offset ?? 0, (spec.offset ?? 0) + spec.limit) };
-      const groups = new Map<string, { values: unknown[]; count: number }>();
-      for (const key of spec.groupBy) expect(serviceKeys.some((field) => field.name === key.name && field.fieldContext === key.fieldContext)).toBe(true);
-      for (const row of selected) {
-        const values = spec.groupBy.map((key: any) => evaluate(`${key.fieldContext}.${key.name}`, wireFields(row)) ?? "");
-        const key = JSON.stringify(values);
-        const group = groups.get(key) ?? { values, count: 0 };
-        group.count++;
-        groups.set(key, group);
-      }
-      return { queryName: spec.name, columns: [...spec.groupBy.map((key: any) => ({ name: key.name, fieldContext: key.fieldContext, columnType: "group" })), { name: "n", columnType: "aggregation" }], data: [...groups.values()].map((group) => [...group.values, group.count]) };
+      expect(request.requestType).toBe("raw");
+      return { queryName: spec.name, rows: selected.slice(spec.offset ?? 0, (spec.offset ?? 0) + spec.limit) };
     });
     return { status: "success", data: { data: { results } } };
   };

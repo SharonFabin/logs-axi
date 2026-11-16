@@ -119,13 +119,6 @@ it("redacts JSON HTTP failures before slicing the response body", async () => {
   }
 });
 
-it("enforces AWS's documented maximum of ten case branches in emitted query expressions", () => {
-  const branches = Array.from({ length: 10 }, (_, i) => `${i} = 0, "value-${i}"`);
-  expect(evaluate(`case(${branches.join(", ")}, "default")`, {})).toBe("value-0");
-  expect(() => evaluate(`case(${[...branches, '11 = 0, "eleventh"'].join(", ")}, "default")`, {})).toThrow("at most 10 branches");
-  expect(insightsFields(buildQuery({ ...range, limit: 10 }), { level: "critical", "@message": "ordinary" })).toBeDefined();
-});
-
 it("omits V8 parser input excerpts from config errors in commands and the home view", async () => {
   const directory = fs.mkdtempSync(path.resolve("test/config-diagnostics-"));
   const file = path.join(directory, "config.json");
