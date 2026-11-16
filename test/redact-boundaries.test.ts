@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CloudWatchLogsClient } from "@aws-sdk/client-cloudwatch-logs";
 import { run } from "../src/cli.js";
-import { isPatientField, maskText, redactObject } from "../src/lib/redact.js";
+import { PROTECTED_KEYS, isPatientField, maskText, redactObject } from "../src/lib/redact.js";
 import { cloudwatch } from "../src/sources/cloudwatch.js";
 import { signoz } from "../src/sources/signoz.js";
 import { NOW, TEST_CONFIG, cloudwatchStub, events, signozStub } from "./fixtures.js";
@@ -30,16 +30,18 @@ describe("labelled identifier value contract", () => {
   }
 });
 
-it.each([
-  ...["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full name", "fullname", "first name", "firstname", "last name", "lastname", "name"].flatMap((label) =>
-    ["Jane", "jane", "Jane de Silva", "Jan van Rossum", "O'Brien", "J Smith", "Dr Jane de Silva", "Smith, Jane"].map((name) => [label, name, "[name]"])),
-  ["ssn", "123456789", "[ssn]"], ["social security number", "123456789", "[ssn]"],
-  ["dob", "1950-01-05", "[dob]"], ["birthdate", "1950-01-05", "[dob]"],
-  ["mrn", "A12345", "[mrn]"], ["medical record number", "A12345", "[mrn]"],
-  ["rxNumber", "123456", "[rx]"],
-  ...["member", "subscriber", "policy", "medicaid", "medicare", "mbi", "beneficiary", "insurance"].map((label) => [`${label}Id`, "MBR12345", "[id]"]),
-  ["room", "12B", "[room]"], ["bed", "12B", "[room]"],
-])("protects %s in every label/value representation", (label, value, replacement) => {
+const protectedValues: Record<keyof typeof PROTECTED_KEYS, string[]> = {
+  name: ["Jane", "jane", "Will", "J", "Jane de Silva", "Jan van Rossum", "O'Brien", "J Smith", "Dr Jane de Silva", "Smith, Jane"],
+  ssn: ["123456789"], dob: ["1950-01-05"], mrn: ["A12345"], rx: ["123456"], id: ["MBR12345"], room: ["12B"],
+  phone: ["+15551234567"], email: ["private@example.test"], redacted: ["PROTECTEDVALUE"],
+};
+const protectedCases = Object.entries(PROTECTED_KEYS).flatMap(([kind, keys]) => [...new Set(keys)].flatMap((key) => {
+  const words = key.split(" ");
+  const variants = new Set([words.join(""), words.join("_"), words.join("-"), words.join("."), words.join(" "), words.join("_").toUpperCase(), words.map((word, i) => i ? word[0]!.toUpperCase() + word.slice(1) : word).join("")]);
+  return [...variants].flatMap((label) => protectedValues[kind as keyof typeof PROTECTED_KEYS].map((value) => [label, value, `[${kind}]`]));
+}));
+
+it.each(protectedCases)("protects %s=%s in every label/value representation", (label, value, replacement) => {
   const ids = '"requestId":"987654321","caseId":"case-1"';
   const fragments = [
     ...[":", "=", " "].map((separator) => `lookup failed ${label}${separator}${value}; ${ids}`),
@@ -53,8 +55,8 @@ it.each([
   for (const fragment of fragments) {
     const output = maskText(fragment);
     expect(output).not.toContain(value);
-    if (replacement === "[name]") for (const token of value.match(/\p{L}+/gu) ?? []) {
-      expect(output.match(/\p{L}+/gu) ?? []).not.toContain(token);
+    for (const token of value.match(/[\p{L}\p{N}]+/gu) ?? []) {
+      expect(output.match(/[\p{L}\p{N}]+/gu) ?? []).not.toContain(token);
     }
     expect(output).toContain('"requestId":"987654321"');
     expect(output).toContain('"caseId":"case-1"');
@@ -65,6 +67,15 @@ it.each([
       expect(maskText(`${label}: ${value}${suffix}`)).toBe(`${label}: [name]${suffix}`);
     }
   }
+});
+
+it.each([
+  ['lookup failed first name Will; retry', 'lookup failed first name [name]; retry'],
+  ['lookup failed first_name J; retry', 'lookup failed first_name [name]; retry'],
+  ['request failed {"social_security_number":"123456789"', 'request failed {[ssn]'],
+  ['request failed {"patient.social-security-number":"123456789"', 'request failed {[ssn]'],
+])("masks the reported protected-label fragment %s", (input, expected) => {
+  expect(maskText(input)).toBe(expected);
 });
 
 it.each([

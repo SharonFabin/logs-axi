@@ -39,6 +39,7 @@ describe("free-text masking", () => {
     ["Failed to notify Jane McDonald", "Failed to notify [name]"],
     ["Dr McDonald signed", "Dr [name] signed"],
     ["resident: DeShawn MacArthur", "resident: [name]"],
+    ["Patient Not Found", "Patient [name]"],
     ["mail jane.t@example.com DOB: 01/05/1950", "mail [email] [dob]"],
     ["MRN: A12345 Rx #1234567 member id ABC12345 room 12B ssn 123-45-6789", "[mrn] [rx] [id] [room] [ssn]"],
   ])("%s", (input, expected) => expect(maskText(input)).toBe(expected));
@@ -48,7 +49,6 @@ describe("free-text masking", () => {
     "TypeError: Cannot read properties of undefined (reading 'id')",
     "payer lookup failed after 3 retries",
     "GET /api/cases/3f2a1c9e-1111-4222-8333-444455556666 returned 502 Bad Gateway",
-    "Patient Not Found",
     "case created",
     "request 123456789 caseId=987654321",
     "caseId=case-1 residentId=resident-1 patientId=patient-1",

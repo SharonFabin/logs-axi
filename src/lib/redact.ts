@@ -11,27 +11,26 @@
  */
 import type { LogRecord } from "../core/types.js";
 
-/** Normalized key (lowercase, alphanumerics only) of a field that is always patient data. */
-const DROP_EXACT = new Set([
-  "name", "names", "fullname", "firstname", "lastname", "middlename", "givenname", "familyname", "surname",
-  "displayname", "preferredname", "nickname", "initials",
-  "resident", "residents", "patient", "patients", "prescriber", "prescribers", "physician", "doctor", "provider",
-  "dob", "dateofbirth", "birthdate", "birthday", "age", "gender", "sex",
-  "ssn", "socialsecuritynumber", "mrn", "medicalrecordnumber", "chartnumber",
-  "phone", "phonenumber", "mobile", "cell", "fax", "email", "emailaddress",
-  "address", "street", "streetaddress", "addressline1", "addressline2", "city", "zip", "zipcode", "postalcode",
-  "memberid", "membernumber", "subscriberid", "subscribernumber", "policyid", "policynumber", "groupnumber",
-  "medicaidid", "medicareid", "mbi", "mbiid", "beneficiaryid", "insuranceid",
-  "rx", "rxnumber", "rxno", "npi", "dea",
-  "drug", "drugs", "drugname", "medication", "medications", "ndc", "sig", "directions", "dose", "dosage",
-  "diagnosis", "diagnoses", "icd10", "icd", "allergy", "allergies",
-  "room", "roomnumber", "bed", "bednumber",
-].map(singularKey));
-/** A key that starts with a person prefix is dropped unless it is an id or a count (`residentDob` goes, `residentId` stays). */
-const PERSON_PREFIX = /^(resident|patient|prescriber|physician|doctor|member|subscriber|guardian|caregiver|contact|emergencycontact|nextofkin|recipient|sender)/;
+const PERSON_PREFIXES = ["resident", "patient", "prescriber", "physician", "doctor", "member", "subscriber", "guardian", "caregiver", "contact", "emergency contact", "next of kin", "recipient", "sender"];
+export const PROTECTED_KEYS = {
+  name: ["name", "names", "full name", "first name", "last name", "middle name", "given name", "family name", "surname", "display name", "preferred name", "nickname", "initials", "residents", "patients", "prescribers", "provider", ...PERSON_PREFIXES,
+    ...["first", "last", "middle", "full", "given", "family", "sur", "display", "user", "person", "contact", "sender", "recipient", "provider", "prescriber", "resident", "patient", "physician", "doctor", "member", "subscriber", "caregiver", "guardian"].map((stem) => `${stem} name`)],
+  ssn: ["ssn", "social security number"],
+  dob: ["dob", "date of birth", "birth date", "birthday"],
+  mrn: ["mrn", "MR#", "medical record", "medical record number", "chart number"],
+  rx: ["rx", "rx number", "rx no", "rx num"],
+  id: ["mbi", "npi", "dea", "group number", ...["member", "subscriber", "policy", "medicaid", "medicare", "mbi", "beneficiary", "insurance"].flatMap((stem) => ["id", "number", "no", "num"].map((suffix) => `${stem} ${suffix}`))],
+  room: ["room", "room number", "rm", "bed", "bed number"],
+  phone: ["phone", "phone number", "mobile", "cell", "fax"],
+  email: ["email", "email address"],
+  redacted: ["age", "gender", "sex", "address", "street", "street address", "address line 1", "address line 2", "city", "zip", "zip code", "postal code", "drug", "drugs", "drug name", "medication", "medications", "medication name", "ndc", "sig", "directions", "dose", "dosage", "diagnosis", "diagnoses", "icd10", "icd", "allergy", "allergies"],
+};
+type ProtectedKind = keyof typeof PROTECTED_KEYS;
+const normalizeKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9#]/g, "");
+const KEY_KINDS = new Map<string, ProtectedKind>(Object.entries(PROTECTED_KEYS).flatMap(([kind, keys]) => keys.map((key) => [singularKey(normalizeKey(key)), kind as ProtectedKind] as [string, ProtectedKind])));
+const NAME_SUFFIXES = [...KEY_KINDS].filter(([key]) => key !== "name" && key.endsWith("name"));
+const PERSON_PREFIX = new RegExp("^(?:" + PERSON_PREFIXES.map(normalizeKey).join("|") + ")");
 const KEEP_SUFFIX = /(id|ids|count|counts|total)$/;
-/** Any key ending in `name` with a person-ish stem: `prescriberName`, `senderName`, `userName`. */
-const PERSON_NAME = /(first|last|middle|full|given|family|sur|display|user|person|contact|sender|recipient|provider|prescriber|resident|patient|physician|doctor|member|subscriber|caregiver|guardian|drug|medication)name$/;
 
 /** Fields that are structure, not content: never masked. */
 const STRUCTURAL = new Set(["service", "level", "time", "traceId", "spanId", "requestId", "correlationId"]);
@@ -43,17 +42,21 @@ function singularKey(key: string): string {
   return key;
 }
 
-export function isPatientField(key: string): boolean {
-  const parts = key.split(/[.\/:]+/).filter(Boolean).map((part) => singularKey(part.toLowerCase().replace(/[^a-z0-9]/g, "")));
+function patientFieldKind(key: string): ProtectedKind | undefined {
+  const parts = key.split(/[.\/:]+/).filter(Boolean).map((part) => singularKey(normalizeKey(part)));
   const last = parts.at(-1) ?? "";
   const k = parts.join("");
-  const protectedKey = (value: string) => {
-    if (DROP_EXACT.has(value) || PERSON_NAME.test(value)) return true;
-    if (!PERSON_PREFIX.test(value)) return false;
-    if (DROP_EXACT.has(value.replace(PERSON_PREFIX, ""))) return true;
-    return !KEEP_SUFFIX.test(value);
+  const protectedKey = (value: string): ProtectedKind | undefined => {
+    const exact = KEY_KINDS.get(value) ?? NAME_SUFFIXES.find(([suffix]) => value.endsWith(suffix))?.[1];
+    if (exact) return exact;
+    if (!PERSON_PREFIX.test(value)) return undefined;
+    return KEY_KINDS.get(value.replace(PERSON_PREFIX, "")) ?? (KEEP_SUFFIX.test(value) ? undefined : "redacted");
   };
-  return protectedKey(k) || (last !== "name" && protectedKey(last));
+  return protectedKey(k) ?? (last !== "name" ? protectedKey(last) : undefined);
+}
+
+export function isPatientField(key: string): boolean {
+  return patientFieldKind(key) !== undefined;
 }
 
 /** Capitalized words common in log messages; a run made only of these is not a name. */
@@ -88,32 +91,59 @@ const COMMON = new Set(
 /** A capitalized word, interior capitals included (`McDonald`, `DeShawn`). */
 const CAP_WORD = String.raw`\p{Lu}[\p{Ll}'’\-]+(?:\p{Lu}[\p{Ll}'’\-]+)*`;
 const UPPER_WORD = String.raw`\p{Lu}{2,}`;
-/** Case-insensitive literal without the `i` flag: under `iu`, \p{Lu} would also match lowercase letters. */
-const ci = (w: string) => w.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`);
-const NAME_LABEL = `(?:${["resident", "patient", "prescriber", "physician", "doctor", "provider", "member", "subscriber", "caregiver", "guardian", "sender", "recipient", "full ?name", "first ?name", "last ?name", "name"].map(ci).join("|")})(?=["']?(?:\\s*[:=#]|\\s+))`;
-
 const labelledValue = (label: string, value: string, flags = "gi", quotedValue = value) =>
-  new RegExp(String.raw`(["']?\b(?:${label})["']?)(\s*[:=#]?\s*)(?:(["'])(${quotedValue})\3?|(${value}))`, flags);
+  new RegExp(String.raw`(?<![\w."'-])((?:"\b(?:${label})"|'\b(?:${label})'|\b(?:${label})))(\s*[:=#]\s*|\s+|(?<=#))(?:(["'])(${quotedValue})\3?|(${value}))`, flags);
+
+const PLAIN_VALUE = String.raw`(?!["']?[\w.-]+["']?\s*[:=])(?=[^\s:=#])[^;,{}\[\]()|\r\n"]+?(?=\s*(?:[;,{}\[\]()|\r\n"]|$)|\s+["']?[\w.-]+["']?\s*[:=])`;
+const QUOTED_VALUE = String.raw`(?:(?<=\p{L})\3(?=\p{L})|(?!\3|\s+["']?[\w.-]+["']?\s*[:=])[^;\r\n}])+`;
+const VALUE_SHAPES: Record<ProtectedKind, string> = {
+  name: PLAIN_VALUE,
+  ssn: String.raw`(?:\d{9}|\d{3}-\d{2}-\d{4})\b`,
+  dob: String.raw`[^\s"';,]+(?:\s+\d{1,2},?\s+\d{2,4})?`,
+  mrn: String.raw`[A-Z0-9-]+`,
+  rx: String.raw`\d[\d-]{3,}\d\b`,
+  id: String.raw`[A-Z0-9][A-Z0-9-]{3,}`,
+  room: String.raw`\d+[A-Z]?\b`,
+  phone: String.raw`\+?[\d(). -]{7,}\d`,
+  email: String.raw`[\w.+-]+@[\w-]+\.[\w.]+`,
+  redacted: PLAIN_VALUE,
+};
+
+function labelPattern(kind: ProtectedKind): string {
+  const spell = (key: string) => [...key].join(String.raw`[_.\s-]*`);
+  const keys = [...new Set(PROTECTED_KEYS[kind].flatMap((key) => {
+    const normalized = normalizeKey(key);
+    const singular = singularKey(normalized);
+    const plural = /[^aeiou]y$/.test(singular) ? singular.slice(0, -1) + "ies" : /(?:s|x|z|ch|sh)$/.test(singular) ? singular + "es" : singular + "s";
+    return [normalized, singular, plural];
+  }))].sort((a, b) => b.length - a.length);
+  const prefix = PERSON_PREFIXES.map((key) => spell(normalizeKey(key))).join("|");
+  const known = keys.map((key) => (key !== "name" && key.endsWith("name") ? String.raw`[\w. -]*` : "") + spell(key)).join("|");
+  const unknown = kind === "redacted" ? String.raw`|(?:${prefix})[\w. -]+(?=["']?\s*[:=#])` : "";
+  return String.raw`(?:[\w-]+[./:])*(?:(?:${prefix})[_.\s-]*)?(?:${known}${unknown})[_.-]*(?:(?<=#)|(?=["']?(?:\s*[:=#]|\s+)))`;
+}
+
+function labelRule(kind: ProtectedKind): [RegExp, (m: string, ...groups: string[]) => string] {
+  const whole = kind === "name" || kind === "redacted";
+  return [
+    labelledValue(labelPattern(kind), VALUE_SHAPES[kind], "giu", whole ? QUOTED_VALUE : VALUE_SHAPES[kind]),
+    (m, label, sep, quote) => {
+      if (patientFieldKind(label!) !== kind) return m;
+      return kind === "name" ? `${label}${sep}${quote ?? ""}[name]${quote ?? ""}` : `[${kind}]`;
+    },
+  ];
+}
 
 const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
+  ...Object.keys(PROTECTED_KEYS).filter((kind) => kind !== "name").map((kind) => labelRule(kind as ProtectedKind)),
   [/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "[email]"],
-  [labelledValue(String.raw`SSN(?![A-Za-z])|social[ -]security[ -]number(?![A-Za-z])`, String.raw`(?:\d{9}|\d{3}-\d{2}-\d{4})\b`), "[ssn]"],
   [/\b\d{3}-\d{2}-\d{4}\b/g, "[ssn]"],
   [/\+\d{10,15}(?!\d)/g, "[phone]"],
   [/(?<![\w.])(?:1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?![\w.])/g, "[phone]"],
-  [labelledValue(String.raw`DOB|D\.O\.B\.?|date of birth|birth ?date`, String.raw`[^\s"';,]+(?:\s+\d{1,2},?\s+\d{2,4})?`), "[dob]"],
-  [labelledValue(String.raw`MRN(?![A-Za-z])|MR#|medical record(?: number)?(?![A-Za-z])`, String.raw`[A-Z0-9-]+`), "[mrn]"],
-  [labelledValue(String.raw`Rx\s*(?:#|no\.?|num(?:ber)?)?`, String.raw`\d[\d-]{3,}\d\b`), "[rx]"],
-  [labelledValue(String.raw`(?:member|subscriber|policy|medicaid|medicare|mbi|beneficiary|insurance)\s*(?:id|#|no\.?|num(?:ber)?)`, String.raw`[A-Z0-9][A-Z0-9-]{3,}`), "[id]"],
-  [labelledValue(String.raw`room|rm\.?|bed`, String.raw`\d+[A-Z]?\b`), "[room]"],
   // Smith, Jane / SMITH, JANE
   [new RegExp(String.raw`\b(?:${CAP_WORD}|${UPPER_WORD}),\s?(?:${CAP_WORD}|${UPPER_WORD})(?:\s\p{Lu}\.?)?(?![\p{L}])`, "gu"), nameUnlessCommon],
   // resident: Jane Doe / patient="JOHN SMITH" / name=Smith
-  [
-    labelledValue(NAME_LABEL, String.raw`(?=\S)[^;,{}\[\]()|\r\n"]+?(?=\s*(?:[;,{}\[\]()|\r\n"]|$)|\s+["']?[\w.-]+["']?\s*[:=])`, "gu", String.raw`(?:(?<=\p{L})\3(?=\p{L})|(?!\3|\s+["']?[\w.-]+["']?\s*[:=])[^;\r\n}])+`),
-    (m: string, label: string, sep: string, q: string | undefined, _quotedName: string | undefined, plainName: string) =>
-      q || /[:=#]/.test(sep) || nameUnlessCommon(plainName) !== plainName ? `${label}${sep}${q ?? ""}[name]${q ?? ""}` : m,
-  ],
+  labelRule("name"),
   // Dr Smith, Mrs. Jane Doe, NP Jones
   [
     new RegExp(String.raw`\b(Dr|Doctor|Mr|Mrs|Ms|Miss|Mx|Prof|Nurse|NP|RN|LPN|PA)\.?\s+${CAP_WORD}(?:\s+${CAP_WORD})?`, "gu"),
