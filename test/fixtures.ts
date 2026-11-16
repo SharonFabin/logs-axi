@@ -98,7 +98,7 @@ export function cloudwatchResults(evs: Event[]) {
       { field: "@timestamp", value: e.time.replace("T", " ").replace("Z", "") },
       { field: "@message", value: line(e) },
       { field: "@logStream", value: `${e.service.replace(/-service$/, "")}/${e.service.replace(/-service$/, "")}/${hex(rng(i), 32)}` },
-      { field: "@ptr", value: `CmAKJwojMTMwMjM3OTY4NDQ4Oi9wb2ludDM2MC9kZXYQBhI1GhgCBm${hex(rng(i + 1), 40)}EAEYAg==` },
+      { field: "@ptr", value: Buffer.from(hex(rng(i + 1), 128), "hex").toString("base64") },
     ]),
     statistics: { recordsMatched: sorted.length, recordsScanned: sorted.length * 40, bytesScanned: sorted.length * 40 * 350 },
     status: "Complete",

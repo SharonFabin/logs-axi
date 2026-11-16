@@ -6,6 +6,7 @@
 import { redactRecord, type RedactStats } from "../lib/redact.js";
 import { template } from "../lib/template.js";
 import type { Help } from "../output/toon.js";
+import { ID_FIELDS } from "./normalize.js";
 import type { Level, LogQuery, LogRecord, Source, TimeRange } from "./types.js";
 
 export const MSG_MAX = 200;
@@ -161,11 +162,9 @@ export function trace(ctx: Ctx, id: string, f: LineFlags): Promise<Output> {
   );
 }
 
-const SAMPLE_KEYS = ["requestId", "correlationId", "caseId", "runId"];
-
 function sampleId(fields: Record<string, unknown>): string | undefined {
   const ok = (v: unknown): v is string => typeof v === "string" && v !== "";
-  for (const k of SAMPLE_KEYS) if (ok(fields[k])) return fields[k];
+  for (const k of ID_FIELDS) if (ok(fields[k])) return fields[k];
   return undefined;
 }
 const ERROR_DETAIL_KEYS = ["error", "err", "errorMessage", "exception.message", "errorName", "reason", "detail"];

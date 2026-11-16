@@ -143,11 +143,29 @@ it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id"]
     const unrelated = row({ body: "failed", severity_text: "ERROR", attributes_string: { residentId: id } });
     const src = signoz({ endpoint: "http://x" }, "t", wireTransport([body, attribute, unrelated]));
     expect((await src.query({ ...range, id, limit: 10 })).rows).toHaveLength(2);
-    const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wireTransport([body]) } };
-    const errors = JSON.parse((await run(["signoz", "dev", "errors", "--json"], deps)).out);
-    expect(errors.groups[0].sample).toBe(id);
-    const traced = JSON.parse((await run(["signoz", "dev", "trace", errors.groups[0].sample, "--json"], deps)).out);
-    expect(traced.lines).toHaveLength(1);
+    for (const input of [body, attribute]) {
+      const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wireTransport([input]) } };
+      const result = await run(["signoz", "dev", "errors", "--json"], deps);
+      expect(result.code).toBe(0);
+      const errors = JSON.parse(result.out);
+      expect(errors.groups[0].sample).toBe(id);
+      expect(errors.help).toContain(`Run \`logs-axi signoz dev trace ${id}\` to see one occurrence in context`);
+      const traced = JSON.parse((await run(["signoz", "dev", "trace", errors.groups[0].sample, "--json"], deps)).out);
+      expect(traced.lines).toHaveLength(1);
+    }
+  }
+});
+
+it("SigNoz error samples prefer promoted trace IDs over attribute IDs", async () => {
+  for (const body of ["failed", JSON.stringify({ level: "error", msg: "failed", traceId: "body-trace" })]) {
+    const input = row({ body, severity_text: "ERROR", trace_id: "native-trace", attributes_string: { traceId: "attribute-trace", trace_id: "attribute-snake-trace", requestId: "request-1", residentId: "resident-1" } });
+    const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wireTransport([input]) } };
+    const result = await run(["signoz", "dev", "errors", "--json"], deps);
+    expect(result.code).toBe(0);
+    const errors = JSON.parse(result.out);
+    const expected = body === "failed" ? "native-trace" : "body-trace";
+    expect(errors.groups[0].sample).toBe(expected);
+    expect(errors.help).toContain(`Run \`logs-axi signoz dev trace ${expected}\` to see one occurrence in context`);
   }
 });
 
