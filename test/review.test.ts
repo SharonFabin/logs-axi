@@ -111,10 +111,12 @@ it("sanitizes complete provider JSON before truncating errors", async () => {
 
 it("redacts JSON HTTP failures before slicing the response body", async () => {
   const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ mrn: "SECRET", padding: "x".repeat(400), medication: "apixaban" }), { status: 500 }));
+  vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test");
   try {
-    const src = signoz({ endpoint: "http://x", apiKey: "test" }, "t");
+    const src = signoz({ endpoint: "http://x" }, "t");
     await expect(src.query({ ...range, limit: 1 })).rejects.not.toThrow(/SECRET|apixaban/);
   } finally {
+    vi.unstubAllEnvs();
     fetch.mockRestore();
   }
 });
@@ -122,7 +124,7 @@ it("redacts JSON HTTP failures before slicing the response body", async () => {
 it("omits V8 parser input excerpts from config errors in commands and the home view", async () => {
   const directory = fs.mkdtempSync(path.resolve("test/config-diagnostics-"));
   const file = path.join(directory, "config.json");
-  fs.writeFileSync(file, '{"sources":{"signoz":{"dev":{"apiKey":CONFIGKEYSECRET}}}}');
+  fs.writeFileSync(file, '{"sources":{"signoz":{"dev":{"endpoint":CONFIGKEYSECRET}}}}');
   vi.stubEnv("LOGS_AXI_CONFIG", file);
   try {
     expect(() => loadConfig()).toThrow(`config ${file} is not valid JSON`);
@@ -143,8 +145,9 @@ it("omits V8 parser input excerpts from config errors in commands and the home v
 
 it("omits V8 parser input excerpts from malformed successful SigNoz responses", async () => {
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('{"mrn":MRNSECRET}', { status: 200 }));
+  vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test");
   try {
-    const config = { sources: { signoz: { dev: { endpoint: "http://x", apiKey: "test" } } } };
+    const config = { sources: { signoz: { dev: { endpoint: "http://x" } } } };
     const src = signoz(config.sources.signoz.dev, "t");
     await expect(src.query({ ...range, limit: 1 })).rejects.toThrow(/^signoz: response is not valid JSON$/);
     const result = await run(["signoz", "dev", "tail"], { config, now: NOW });

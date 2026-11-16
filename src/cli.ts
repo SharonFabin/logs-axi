@@ -5,6 +5,7 @@
 import { parseArgs, type FlagSchema, type ParsedArgs } from "./lib/args.js";
 import { AxiError, usageError } from "./lib/errors.js";
 import { loadConfig, configPath, type Config } from "./lib/config.js";
+import { KEY_ENV, readSecret, realSys, saveSignozKey, validKey, type Sys } from "./lib/credentials.js";
 import { rangeLabel, resolveRange } from "./lib/time.js";
 import { render, renderHelp, toon } from "./output/toon.js";
 import { SOURCES } from "./sources/index.js";
@@ -16,6 +17,9 @@ export interface Deps {
   /** Per source name: the transport its adapter uses instead of the network. */
   transports?: Record<string, unknown>;
   now?: number;
+  /** `signoz login`: the hidden prompt and the platform/env/home the credentials path uses. */
+  readSecret?: (prompt: string) => Promise<string>;
+  sys?: Sys;
 }
 
 export const DESCRIPTION = "Read logs from CloudWatch, SigNoz and future sources, agent-first: grouped, redacted, token-light";
@@ -99,6 +103,7 @@ async function route(argv: string[], deps: Deps): Promise<string> {
   if (!SOURCES[source]) {
     throw usageError(`unknown source \`${source}\``, [`valid sources: ${Object.keys(SOURCES).join(", ")}`, "Run `logs-axi` to see what is configured"]);
   }
+  if (env === "login") return login(source, argv.slice(2), deps);
   const config = deps.config ?? loadConfig();
   const envs = config.sources[source] ?? {};
   if (!env || env === "--help" || env === "-h") {
@@ -198,6 +203,32 @@ function parseLimit(v: unknown, dflt: number): number {
   return n;
 }
 
+const LOGIN_FLAGS: FlagSchema = { env: { type: "string", description: "store the key for one environment only (default: all)" } };
+
+/** `logs-axi signoz login`: prompt for the viewer key without echo and store it per user. */
+async function login(source: string, argv: string[], deps: Deps): Promise<string> {
+  if (source !== "signoz") {
+    throw usageError(`${source} has no login`, source === "cloudwatch" ? ["CloudWatch uses the AWS profile in the config: run `aws sso login --profile <profile>`"] : []);
+  }
+  const args = parseArgs(argv, LOGIN_FLAGS, "signoz login");
+  if (args.help) return `logs-axi signoz login [--env <env>] - store a SigNoz viewer API key (prompted, never echoed)
+
+Flags:
+${flagLines(LOGIN_FLAGS)}
+`;
+  // never echo positionals: a pasted key would land in the output
+  if (args.positionals.length) throw usageError("signoz login takes no arguments: the key is never passed on the command line", ["Run `logs-axi signoz login` and paste the key at the prompt"]);
+  const env = typeof args.flags.env === "string" ? args.flags.env : undefined;
+  const key = await (deps.readSecret ?? ((p) => readSecret(p)))(`SigNoz viewer API key${env ? ` for ${env}` : ""}: `);
+  if (!key) throw usageError("no key entered", ["Run `logs-axi signoz login` and paste the key at the prompt"]);
+  if (!validKey(key)) throw usageError("invalid API key: use a single printable ASCII token");
+  const sys = deps.sys ?? realSys();
+  const file = saveSignozKey(key, env, sys);
+  const body: Record<string, unknown> = { stored: "signoz", for: env ?? "all environments", credentials: file };
+  if (sys.env[KEY_ENV]) body.note = `${KEY_ENV} is set and overrides this file`;
+  return render(body, [`Run \`logs-axi signoz ${env ?? "dev"} services\` to check the key`]);
+}
+
 /** Content first: what is configured, and what to run. Works without a config. */
 function home(deps: Deps): string {
   let config: Config | undefined;
@@ -240,6 +271,7 @@ Usage:
   logs-axi                                   what is configured
   logs-axi <source> <env> <command> [flags]  e.g. logs-axi signoz dev errors --since 1h --service case
   logs-axi <source> <env>                    same as \`errors\`
+  logs-axi signoz login [--env <env>]        store a SigNoz viewer key (hidden prompt; or set ${KEY_ENV})
 
 Sources: ${Object.keys(SOURCES).join(", ")}   (environments come from ${configPath()})
 

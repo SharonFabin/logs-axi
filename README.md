@@ -30,7 +30,8 @@ help[2]:
 ```bash
 npm install -g github:SharonFabin/logs-axi
 mkdir -p ~/.config/logs-axi && cp "$(npm root -g)/logs-axi/config.example.json" ~/.config/logs-axi/config.json
-logs-axi            # shows what is configured
+logs-axi signoz login   # SigNoz viewer key: hidden prompt, stored per user
+logs-axi                # shows what is configured
 ```
 
 The config (`$LOGS_AXI_CONFIG`, else `$XDG_CONFIG_HOME/logs-axi/config.json` when
@@ -43,20 +44,36 @@ port-forward. No secrets live in it:
 | source | settings | credentials |
 |---|---|---|
 | `cloudwatch` | `region`, `logGroups[]`, `profile` | the AWS profile (`aws sso login --profile ...`) |
-| `signoz` | `endpoint`, `apiKeyEnv` (or `apiKey`) | a viewer API key in the env var `apiKeyEnv` names, default `SIGNOZ_API_KEY` |
+| `signoz` | `endpoint` | a viewer API key: `$LOGS_AXI_SIGNOZ_KEY`, else the credentials file `logs-axi signoz login` writes |
 
 SigNoz has no public port: run `terraform output -raw signoz_ui_command` in
 `infra/aws/environments/<env>` of the monorepo to forward it (dev on 3301, prod on 3302
 in the example).
 
+### SigNoz login
+
+`logs-axi signoz login` prompts for the viewer API key with hidden input (nothing is
+echoed, in Linux, macOS and Windows terminals alike) and stores it per user. It never
+takes the key as an argument and never prints it. `--env prod` stores a key for one
+environment only; without it the key serves every environment. Piped input works too:
+`aws ssm get-parameter --profile Point360-Admin --with-decryption --name /point360/dev/shared/SIGNOZ_VIEWER_KEY --query Parameter.Value --output text | logs-axi signoz login --env dev`.
+
+| OS | credentials file |
+|---|---|
+| Linux, macOS | `$XDG_CONFIG_HOME/logs-axi/credentials`, else `~/.config/logs-axi/credentials` (file `0600`, directory `0700`) |
+| Windows | `%APPDATA%\logs-axi\credentials` (protected by the profile's ACLs) |
+
+SigNoz commands use `$LOGS_AXI_SIGNOZ_KEY` when it is set, else the file's key for that
+environment, else its all-environments key. With neither, they print a one-line hint to
+run `logs-axi signoz login`. No OS keychain integration.
+
 **Live status (v1):** the CloudWatch adapter is verified read-only against dev and prod.
 The SigNoz adapter is untested against a live server, pending a viewer API key: its
 request and response shapes follow SigNoz's v5 `query_range` contract (as used by the
-official SigNoz MCP server) and are covered by recorded-shape tests only. To try it:
-start the port-forward above, then
-`export SIGNOZ_API_KEY_DEV="$(aws ssm get-parameter --profile Point360-Admin --with-decryption --name /point360/dev/shared/SIGNOZ_VIEWER_KEY --query Parameter.Value --output text)"`
-(prod: the `/point360/prod/...` parameter into `SIGNOZ_API_KEY_PROD`) and run
-`logs-axi signoz dev services`.
+official SigNoz MCP server) and are covered by recorded-shape tests only (a live dev
+server answers 401 to an invalid key, as expected). To try it: start the port-forward
+above, run `logs-axi signoz login --env dev` with the dev viewer key from SSM (see above),
+then `logs-axi signoz dev services`.
 
 ## Commands
 

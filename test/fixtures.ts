@@ -215,7 +215,7 @@ export function signozStub(evs: Event[], rec: Recorder = { requests: [], respons
 export const TEST_CONFIG = {
   sources: {
     cloudwatch: { dev: { profile: "test", region: "us-east-1", logGroups: ["/point360/dev"] } },
-    signoz: { dev: { endpoint: "http://localhost:3301", apiKeyEnv: "SIGNOZ_TEST_KEY" } },
+    signoz: { dev: { endpoint: "http://localhost:3301" } },
   },
 };
 

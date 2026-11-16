@@ -30,8 +30,11 @@ followed by `help[N]:` lines with the next commands to run.
 - CloudWatch uses the AWS profile in the config; if it errors on credentials, run
   `aws sso login --profile Point360-Admin`.
 - SigNoz is reached through an SSM port-forward (`terraform output -raw signoz_ui_command`
-  in `infra/aws/environments/<env>`) and needs a viewer key in the env var the config
-  names (`SIGNOZ_API_KEY_DEV`, `SIGNOZ_API_KEY_PROD`).
+  in `infra/aws/environments/<env>`) and needs a viewer API key: `$LOGS_AXI_SIGNOZ_KEY`,
+  else the per-user credentials file. If a command says `no SigNoz API key`, ask the human
+  to run `logs-axi signoz login` (or `logs-axi signoz login --env prod`) themselves: it
+  prompts with hidden input. Never ask for the key in chat, never pass it as an argument,
+  and never print or read the credentials file.
 - Run `logs-axi` with no arguments to see what is configured.
 
 ## Workflow

@@ -2,8 +2,8 @@
  * One config file names every source and environment:
  *   { "sources": { "<source>": { "<env>": { ...that source's settings } } } }
  * Location: $LOGS_AXI_CONFIG, else $XDG_CONFIG_HOME/logs-axi/config.json, else
- * ~/.config/logs-axi/config.json. Secrets may live in env vars the file names
- * (SigNoz `apiKeyEnv`), so the file itself can stay secret-free.
+ * ~/.config/logs-axi/config.json. It holds no secrets: SigNoz keys live in the
+ * credentials file `logs-axi signoz login` writes (src/lib/credentials.ts).
  */
 import fs from "node:fs";
 import os from "node:os";

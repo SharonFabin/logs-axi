@@ -70,10 +70,12 @@ it("masks quoted identifiers in AWS SDK diagnostics", async () => {
 
 it("masks quoted identifiers in SigNoz HTTP and structured error diagnostics", async () => {
   const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('member id: "MBR12345"', { status: 500 }));
+  vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test");
   try {
-    const source = signoz({ endpoint: "http://x", apiKey: "test", apiKeyEnv: "LOGS_AXI_BOUNDARY_TEST_KEY" }, "t");
+    const source = signoz({ endpoint: "http://x" }, "t");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[id]");
   } finally {
+    vi.unstubAllEnvs();
     fetch.mockRestore();
   }
   const source = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: "Rx # '123456'" } }));

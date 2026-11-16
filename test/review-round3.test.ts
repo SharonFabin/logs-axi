@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { run } from "../src/cli.js";
 import { isPatientField, redactObject } from "../src/lib/redact.js";
@@ -37,18 +40,30 @@ it.each(["cloudwatch", "signoz"] as const)("%s removes plural identifiers from e
   }
 });
 
+/** Point the credentials file at an empty temp dir on every OS (XDG on POSIX, APPDATA on Windows). */
+function isolateCredentials(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "logs-axi-creds-"));
+  vi.stubEnv("XDG_CONFIG_HOME", dir);
+  vi.stubEnv("APPDATA", dir);
+  vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "");
+  return dir;
+}
+
 describe("credential diagnostics", () => {
-  it.each(["inline", "environment"])("rejects invalid %s keys before invoking fetch", async (origin) => {
+  it.each(["credentials file", "environment"])("rejects invalid %s keys before invoking fetch", async (origin) => {
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       new Headers(init?.headers);
       return new Response('{"status":"success","data":{"data":{"results":[]}}}');
     });
+    const dir = isolateCredentials();
     try {
-      const invalidKeys = ["KEYSECRET\nSECONDSECRET", "KEYSECRET\rSECONDSECRET", "KEYSECRET\tSECONDSECRET", "KEYSECRET\u0100SECONDSECRET", ...(origin === "inline" ? ["KEYSECRET\0SECONDSECRET"] : [])];
+      const invalidKeys = ["KEYSECRET\nSECONDSECRET", "KEYSECRET\rSECONDSECRET", "KEYSECRET\tSECONDSECRET", "KEYSECRET\u0100SECONDSECRET", ...(origin === "credentials file" ? ["KEYSECRET\0SECONDSECRET"] : [])];
       for (const key of invalidKeys) {
-        vi.stubEnv("LOGS_AXI_TEST_CREDENTIAL", origin === "environment" ? key : "");
-        const env = { endpoint: "http://localhost:1", apiKeyEnv: "LOGS_AXI_TEST_CREDENTIAL", ...(origin === "inline" ? { apiKey: key } : {}) };
-        const config = { sources: { signoz: { dev: env } } };
+        vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", origin === "environment" ? key : "");
+        // a hand-edited file can hold what `login` would refuse
+        fs.mkdirSync(path.join(dir, "logs-axi"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "logs-axi", "credentials"), JSON.stringify({ signoz: { default: origin === "credentials file" ? key : "unused" } }));
+        const config = { sources: { signoz: { dev: { endpoint: "http://localhost:1" } } } };
         for (const command of ["tail", "services"]) {
           const result = await run(["signoz", "dev", command], { config, now: NOW });
           expect(result.code).toBe(1);
@@ -60,6 +75,7 @@ describe("credential diagnostics", () => {
     } finally {
       vi.unstubAllEnvs();
       fetch.mockRestore();
+      fs.rmSync(dir, { recursive: true });
     }
   });
 
@@ -71,9 +87,9 @@ describe("credential diagnostics", () => {
       if (failure === "fetch") throw error;
       return { text: async () => { throw error; } } as unknown as Response;
     });
-    vi.stubEnv("LOGS_AXI_TEST_CREDENTIAL", "");
+    vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", secret);
     try {
-      const result = await run(["signoz", "dev", "tail"], { config: { sources: { signoz: { dev: { endpoint: "http://localhost:1", apiKey: secret, apiKeyEnv: "LOGS_AXI_TEST_CREDENTIAL" } } } }, now: NOW });
+      const result = await run(["signoz", "dev", "tail"], { config: { sources: { signoz: { dev: { endpoint: "http://localhost:1" } } } }, now: NOW });
       expect(result.code).toBe(1);
       expect(result.out).toContain("request failed");
       expect(result.out).not.toContain(secret);

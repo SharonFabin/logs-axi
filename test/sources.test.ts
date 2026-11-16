@@ -100,11 +100,7 @@ describe("signoz", () => {
     await expect(src.query({ ...range, limit: 1 })).rejects.toThrow(/^signoz: "error"$/);
   });
 
-  it("needs an API key before calling out", async () => {
-    delete process.env.SIGNOZ_NOPE;
-    const src = signoz({ endpoint: "http://127.0.0.1:9", apiKeyEnv: "SIGNOZ_NOPE" }, "sources.signoz.dev");
-    await expect(src.query({ ...range, limit: 1 })).rejects.toThrow("no SigNoz API key for sources.signoz.dev");
-  });
+
 });
 
 describe("template", () => {

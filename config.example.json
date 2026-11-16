@@ -1,5 +1,5 @@
 {
-  "//": "Copy to ~/.config/logs-axi/config.json (or point LOGS_AXI_CONFIG at it). No secrets here: SigNoz keys come from the env var each apiKeyEnv names.",
+  "//": "Copy to ~/.config/logs-axi/config.json (or point LOGS_AXI_CONFIG at it). No secrets here: SigNoz keys come from `logs-axi signoz login` (or LOGS_AXI_SIGNOZ_KEY).",
   "sources": {
     "cloudwatch": {
       "dev": {
@@ -16,14 +16,12 @@
     },
     "signoz": {
       "dev": {
-        "//": "SigNoz has no public port: forward it first with `terraform output -raw signoz_ui_command` from infra/aws/environments/dev (local port 3301). The viewer key lives in SSM at /point360/dev/shared/SIGNOZ_VIEWER_KEY.",
-        "endpoint": "http://localhost:3301",
-        "apiKeyEnv": "SIGNOZ_API_KEY_DEV"
+        "//": "SigNoz has no public port: forward it first with `terraform output -raw signoz_ui_command` from infra/aws/environments/dev (local port 3301). The viewer key lives in SSM at /point360/dev/shared/SIGNOZ_VIEWER_KEY; store it with `logs-axi signoz login --env dev`.",
+        "endpoint": "http://localhost:3301"
       },
       "prod": {
         "//": "Same for prod, forwarded to local port 3302 (change localPortNumber in the command) so both can be up at once.",
-        "endpoint": "http://localhost:3302",
-        "apiKeyEnv": "SIGNOZ_API_KEY_PROD"
+        "endpoint": "http://localhost:3302"
       }
     }
   }

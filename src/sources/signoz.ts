@@ -1,19 +1,19 @@
 /**
  * SigNoz through its v5 query API (POST /api/v5/query_range: read-only).
  *
- * Env config: { "endpoint": "http://localhost:3301", "apiKeyEnv": "SIGNOZ_API_KEY_DEV" }
- * The key comes from the env var `apiKeyEnv` names (default SIGNOZ_API_KEY), or from
- * "apiKey" in the config. It is sent as the SIGNOZ-API-KEY header and never printed.
+ * Env config: { "endpoint": "http://localhost:3301" }
+ * The key comes from $LOGS_AXI_SIGNOZ_KEY, else the credentials file
+ * `logs-axi signoz login` writes (src/lib/credentials.ts). It is sent as the
+ * SIGNOZ-API-KEY header and never printed.
  */
 import { AxiError } from "../lib/errors.js";
+import { KEY_ENV, signozKey, validKey } from "../lib/credentials.js";
 import { maskText } from "../lib/redact.js";
 import { ID_FIELDS, INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
   endpoint: string;
-  apiKey?: string;
-  apiKeyEnv?: string;
 }
 
 export type SignozTransport = (path: string, body: unknown) => Promise<unknown>;
@@ -26,22 +26,19 @@ export const signoz: SourceFactory = (raw, label, transport) => {
 function validate(raw: Record<string, unknown>, label: string): SignozEnv {
   if (typeof raw.endpoint !== "string" || !/^https?:\/\//.test(raw.endpoint)) {
     throw new AxiError(`config ${label} needs "endpoint" (http[s]://host:port)`, {
-      help: ['e.g. { "endpoint": "http://localhost:3301", "apiKeyEnv": "SIGNOZ_API_KEY_DEV" }'],
+      help: ['e.g. { "endpoint": "http://localhost:3301" }'],
     });
   }
   return raw as unknown as SignozEnv;
 }
 
 function httpTransport(env: SignozEnv, label: string): SignozTransport {
-  const keyVar = env.apiKeyEnv ?? "SIGNOZ_API_KEY";
+  // the CLI labels env configs `sources.signoz.<env>`
+  const envName = label.split(".").pop() ?? label;
   return async (path, body) => {
-    const key = process.env[keyVar] || env.apiKey;
-    if (!key) {
-      throw new AxiError(`no SigNoz API key for ${label}`, {
-        help: [`export ${keyVar}=<viewer key> (or set "apiKey" in the config) and retry`],
-      });
-    }
-    if (typeof key !== "string" || !/^[\x21-\x7e]+$/.test(key)) throw new AxiError("signoz: invalid API key; use a single printable ASCII token");
+    const key = signozKey(envName);
+    if (!key) throw new AxiError(`no SigNoz API key for ${label}`, { help: ["Run `logs-axi signoz login`"] });
+    if (!validKey(key)) throw new AxiError("signoz: invalid API key; use a single printable ASCII token", { help: ["Run `logs-axi signoz login` to replace it"] });
     let res: Response;
     let text: string;
     try {
@@ -59,7 +56,7 @@ function httpTransport(env: SignozEnv, label: string): SignozTransport {
     }
     if (!res.ok) {
       throw new AxiError(`signoz: HTTP ${res.status}: ${maskText(text).slice(0, 300)}`, {
-        help: res.status === 401 || res.status === 403 ? [`check the key in ${keyVar}`] : [],
+        help: res.status === 401 || res.status === 403 ? [`the key was rejected: run \`logs-axi signoz login\` (or check ${KEY_ENV})`] : [],
       });
     }
     try {
