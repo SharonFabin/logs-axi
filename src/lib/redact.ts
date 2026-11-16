@@ -7,7 +7,7 @@
  *
  * ponytail: the name heuristics are a denylist of shapes, not de-identification. An
  * all-lowercase name in prose survives. Upgrade path: an allowlist of fields per
- * service, like the monorepo's typed logger, if a leak is ever seen.
+ * service, like a typed logger, if a leak is ever seen.
  */
 import type { LogRecord } from "../core/types.js";
 

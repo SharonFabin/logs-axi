@@ -37,19 +37,18 @@ logs-axi                # shows what is configured
 
 The config (`$LOGS_AXI_CONFIG` when nonempty, else `$XDG_CONFIG_HOME/logs-axi/config.json`
 when `XDG_CONFIG_HOME` is nonempty, else `~/.config/logs-axi/config.json`) maps
-`sources.<source>.<env>` to that source's settings. The example ships the Point360
-values: CloudWatch log groups `/point360/dev` and `/point360/prod` in us-east-1 through
-the `Point360-Admin` profile, and SigNoz on the local end of each environment's SSM
-port-forward. No secrets live in it:
+`sources.<source>.<env>` to that source's settings. The example ships placeholder
+values to replace with your own: CloudWatch log groups `/my-app/dev` and `/my-app/prod`
+in us-east-1 through the `my-profile` AWS profile, and SigNoz on `localhost` (one port
+per environment). No secrets live in it:
 
 | source | settings | credentials |
 |---|---|---|
 | `cloudwatch` | `region`, `logGroups[]`, `profile` | the AWS profile (`aws sso login --profile ...`) |
 | `signoz` | `endpoint` | a viewer API key; see [SigNoz login](#signoz-login) |
 
-SigNoz has no public port: run `terraform output -raw signoz_ui_command` in
-`infra/aws/environments/<env>` of the monorepo to forward it (dev on 3301, prod on 3302
-in the example).
+If your SigNoz has no public endpoint, forward it to localhost first (for example with
+an SSM or `kubectl` port-forward); the example uses 3301 for dev and 3302 for prod.
 
 ### SigNoz login
 
@@ -57,7 +56,7 @@ in the example).
 echoed, in Linux, macOS and Windows terminals alike) and stores it per user. It never
 takes the key as an argument and never prints it. `--env prod` stores a key for one
 environment only; without it the key serves every environment. Piped input works too:
-`aws ssm get-parameter --profile Point360-Admin --with-decryption --name /point360/dev/shared/SIGNOZ_VIEWER_KEY --query Parameter.Value --output text | logs-axi signoz login --env dev`.
+`aws ssm get-parameter --profile my-profile --with-decryption --name /my-app/dev/SIGNOZ_VIEWER_KEY --query Parameter.Value --output text | logs-axi signoz login --env dev`.
 
 | OS | credentials file |
 |---|---|
@@ -76,9 +75,9 @@ the newly entered key; run login again for any other environment or default keys
 The SigNoz adapter is untested against a live server, pending a viewer API key: its
 request and response shapes follow SigNoz's v5 `query_range` contract (as used by the
 official SigNoz MCP server) and are covered by recorded-shape tests only (a live dev
-server answers 401 to an invalid key, as expected). To try it: start the port-forward
-above, run `logs-axi signoz login --env dev` with the dev viewer key from SSM (see above),
-then `logs-axi signoz dev services`.
+server answers 401 to an invalid key, as expected). To try it: make the endpoint
+reachable (see above), run `logs-axi signoz login --env dev` with a viewer key, then
+`logs-axi signoz dev services`.
 
 ## Commands
 

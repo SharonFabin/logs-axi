@@ -28,7 +28,7 @@ followed by `help[N]:` lines with the next commands to run.
 - Install: `npm install -g github:SharonFabin/logs-axi`.
 - Config: follow [Install and configure](../../README.md#install-and-configure) for file locations and setup.
 - CloudWatch uses the AWS profile in the config; if it errors on credentials, run
-  `aws sso login --profile Point360-Admin`.
+  `aws sso login --profile <the profile in the config>`.
 - SigNoz setup: see [Install and configure](../../README.md#install-and-configure)
   for the port-forward and [SigNoz login](../../README.md#signoz-login) for credential
   locations, environment scope, lookup order and recovery. If a command says

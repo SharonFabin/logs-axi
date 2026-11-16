@@ -50,7 +50,7 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
       text = await res.text();
     } catch {
       throw new AxiError("signoz: request failed; check the endpoint and connection", {
-        help: ["is the SSM port-forward up? `terraform output signoz_ui_command` in infra/aws/environments/<env> prints it"],
+        help: ["is the SigNoz endpoint reachable (is the port-forward up)?"],
       });
     }
     if (!res.ok) {

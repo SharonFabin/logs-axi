@@ -143,7 +143,7 @@ export function signozRaw(evs: Event[]) {
                     "telemetry.sdk.version": "2.0.1",
                     "process.runtime.name": "bun",
                   },
-                  scope_name: "@point360/observability",
+                  scope_name: "@my-app/observability",
                   scope_version: "",
                   severity_number: SEVERITY[e.level] ?? 9,
                   severity_text: e.level.toUpperCase(),
@@ -214,7 +214,7 @@ export function signozStub(evs: Event[], rec: Recorder = { requests: [], respons
 
 export const TEST_CONFIG = {
   sources: {
-    cloudwatch: { dev: { profile: "test", region: "us-east-1", logGroups: ["/point360/dev"] } },
+    cloudwatch: { dev: { profile: "test", region: "us-east-1", logGroups: ["/my-app/dev"] } },
     signoz: { dev: { endpoint: "http://localhost:3301" } },
   },
 };

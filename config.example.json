@@ -3,24 +3,24 @@
   "sources": {
     "cloudwatch": {
       "dev": {
-        "//": "ECS services log to /point360/<env> with stream prefix <service>/ (infra/aws/modules/environment/cluster.tf). Add \"/point360/dev/api-gateway\" for access logs.",
-        "profile": "Point360-Admin",
+        "//": "Placeholders: your AWS profile and log groups. Services are read from the JSON 'service' field, else the log stream prefix <service>/.",
+        "profile": "my-profile",
         "region": "us-east-1",
-        "logGroups": ["/point360/dev"]
+        "logGroups": ["/my-app/dev"]
       },
       "prod": {
-        "profile": "Point360-Admin",
+        "profile": "my-profile",
         "region": "us-east-1",
-        "logGroups": ["/point360/prod"]
+        "logGroups": ["/my-app/prod"]
       }
     },
     "signoz": {
       "dev": {
-        "//": "SigNoz has no public port: forward it first with `terraform output -raw signoz_ui_command` from infra/aws/environments/dev (local port 3301). The viewer key lives in SSM at /point360/dev/shared/SIGNOZ_VIEWER_KEY; store it with `logs-axi signoz login --env dev`.",
+        "//": "Your SigNoz endpoint (here a localhost port-forward on 3301). Store a viewer API key with `logs-axi signoz login --env dev`.",
         "endpoint": "http://localhost:3301"
       },
       "prod": {
-        "//": "Same for prod, forwarded to local port 3302 (change localPortNumber in the command) so both can be up at once.",
+        "//": "Same for prod on another local port, so both can be up at once.",
         "endpoint": "http://localhost:3302"
       }
     }

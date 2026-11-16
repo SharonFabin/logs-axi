@@ -1,7 +1,7 @@
 /**
  * CloudWatch Logs through Logs Insights (StartQuery + GetQueryResults: read-only).
  *
- * Env config: { "profile": "Point360-Admin", "region": "us-east-1", "logGroups": ["/point360/dev"] }
+ * Env config: { "profile": "my-profile", "region": "us-east-1", "logGroups": ["/my-app/dev"] }
  * The service is the line's JSON `service` field, else its stream prefix (ECS writes
  * `<service>/<container>/<task>`).
  */
@@ -42,7 +42,7 @@ function validate(raw: Record<string, unknown>, label: string): CloudWatchEnv {
   const groups = raw.logGroups;
   if (typeof raw.region !== "string" || !Array.isArray(groups) || groups.length === 0 || !groups.every((g) => typeof g === "string")) {
     throw new AxiError(`config ${label} needs "region" and a non-empty "logGroups" list`, {
-      help: ['e.g. { "profile": "Point360-Admin", "region": "us-east-1", "logGroups": ["/point360/dev"] }'],
+      help: ['e.g. { "profile": "my-profile", "region": "us-east-1", "logGroups": ["/my-app/dev"] }'],
     });
   }
   if (raw.profile !== undefined && typeof raw.profile !== "string") throw new AxiError(`config ${label}: "profile" must be a string`);
