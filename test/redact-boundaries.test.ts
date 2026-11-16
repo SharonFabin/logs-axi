@@ -39,9 +39,10 @@ const protectedCases = Object.entries(PROTECTED_KEYS).flatMap(([kind, keys]) => 
   const words = key.split(" ");
   const variants = new Set([words.join(""), words.join("_"), words.join("-"), words.join("."), words.join(" "), words.join("_").toUpperCase(), words.map((word, i) => i ? word[0]!.toUpperCase() + word.slice(1) : word).join("")]);
   return [...variants].flatMap((label) => protectedValues[kind as keyof typeof PROTECTED_KEYS].map((value) => [label, value, `[${kind}]`]));
-}));
+})).concat(Object.entries({ id: ["group"], mrn: ["MR", "medical record", "chart"], rx: ["rx"], room: ["room", "bed"] }).flatMap(([kind, stems]) => stems.flatMap((stem) => ["no", "num", "number", "#"].flatMap((suffix) => ["", " ", "_", "-", "."].map((separator) => [`${stem}${separator}${suffix}`, protectedValues[kind as keyof typeof PROTECTED_KEYS][0]!, `[${kind}]`])))));
 
 it.each(protectedCases)("protects %s=%s in every label/value representation", (label, value, replacement) => {
+  expect(isPatientField(label)).toBe(true);
   const ids = '"requestId":"987654321","caseId":"case-1"';
   const fragments = [
     ...[":", "=", " "].map((separator) => `lookup failed ${label}${separator}${value}; ${ids}`),
@@ -66,6 +67,25 @@ it.each(protectedCases)("protects %s=%s in every label/value representation", (l
     for (const suffix of ["; retry", ", retry", "} retry", "] retry", ") retry", "| retry", "\nretry", " requestId=req-2", " requestId: req-2", ' "requestId": "req-2"', " 'caseId'=case-2"]) {
       expect(maskText(`${label}: ${value}${suffix}`)).toBe(`${label}: [name]${suffix}`);
     }
+  }
+});
+
+it.each([...PROTECTED_KEYS.name, ...PROTECTED_KEYS.redacted])("consumes escaped quotes and backslashes in protected %s values", (key) => {
+  const value = 'Jane "JJ" Doe\\private';
+  const json = JSON.stringify({ [key]: value, caseId: "case-1" });
+  const truncatedValue = JSON.stringify({ caseId: "case-1", [key]: value }).slice(0, -2);
+  for (const input of [json, json.slice(0, -1), truncatedValue]) {
+    const output = maskText(input);
+    for (const token of ["Jane", "JJ", "Doe", "private"]) expect(output.match(/\p{L}+/gu) ?? []).not.toContain(token);
+    expect(output).toContain('"caseId":"case-1"');
+  }
+});
+
+it.each(["caseId", "residentId", "requestId", "correlationId", "traceId", "runId"])("preserves operational %s labels in every representation", (key) => {
+  expect(isPatientField(key)).toBe(false);
+  const json = JSON.stringify({ [key]: "req-1" });
+  for (const input of [`${key}=req-1`, `${key}: req-1`, `${key} req-1`, json, json.slice(0, -1), json.slice(0, -2)]) {
+    expect(maskText(input)).toBe(input);
   }
 });
 

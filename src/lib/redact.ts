@@ -26,8 +26,7 @@ export const PROTECTED_KEYS = {
   redacted: ["age", "gender", "sex", "address", "street", "street address", "address line 1", "address line 2", "city", "zip", "zip code", "postal code", "drug", "drugs", "drug name", "medication", "medications", "medication name", "ndc", "sig", "directions", "dose", "dosage", "diagnosis", "diagnoses", "icd10", "icd", "allergy", "allergies"],
 };
 type ProtectedKind = keyof typeof PROTECTED_KEYS;
-const compactKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9#]/g, "");
-const normalizeKey = (key: string) => compactKey(key).replace(/(?:#|number|num|no)(s?)$/, "number$1");
+const normalizeKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9#]/g, "").replace(/(?:#|number|num|no)(s?)$/, "number$1");
 const KEY_KINDS = new Map<string, ProtectedKind>(Object.entries(PROTECTED_KEYS).flatMap(([kind, keys]) => keys.map((key) => [singularKey(normalizeKey(key)), kind as ProtectedKind] as [string, ProtectedKind])));
 const NAME_SUFFIXES = [...KEY_KINDS].filter(([key]) => key !== "name" && key.endsWith("name"));
 const PERSON_PREFIX = new RegExp("^(?:" + PERSON_PREFIXES.map(normalizeKey).join("|") + ")");
@@ -92,11 +91,9 @@ const COMMON = new Set(
 /** A capitalized word, interior capitals included (`McDonald`, `DeShawn`). */
 const CAP_WORD = String.raw`\p{Lu}[\p{Ll}'’\-]+(?:\p{Lu}[\p{Ll}'’\-]+)*`;
 const UPPER_WORD = String.raw`\p{Lu}{2,}`;
-const labelledValue = (label: string, value: string, flags = "gi", quotedValue = value) =>
-  new RegExp(String.raw`(?<![\w."'-])((?:"\b(?:${label})"|'\b(?:${label})'|\b(?:${label})))(\s*[:=#]\s*|\s+|(?<=#))(?:(["'])(${quotedValue})\3?|(${value}))`, flags);
-
+const COMMA_NAMES = new RegExp(String.raw`\b(?:${CAP_WORD}|${UPPER_WORD}),\s?(?:${CAP_WORD}|${UPPER_WORD})(?:\s\p{Lu}\.?)?(?![\p{L}])`, "gu");
 const PLAIN_VALUE = String.raw`(?!["']?[\w.-]+["']?\s*[:=])(?=[^\s:=#])[^;,{}\[\]()|\r\n"]+?(?=\s*(?:[;,{}\[\]()|\r\n"]|$)|\s+["']?[\w.-]+["']?\s*[:=])`;
-const QUOTED_VALUE = String.raw`(?:(?<=\p{L})\3(?=\p{L})|(?!\3|\s+["']?[\w.-]+["']?\s*[:=])[^;\r\n}])+`;
+const QUOTED_VALUE = /(["'])((?:\\[\s\S]?|(?<=\p{L})\1(?=\p{L})|(?!\1|\s+["']?[\w.-]+["']?\s*[:=])[^\\;\r\n}])+)\1?/uy;
 const VALUE_SHAPES: Record<ProtectedKind, string> = {
   name: PLAIN_VALUE,
   ssn: String.raw`(?:\d{9}|\d{3}-\d{2}-\d{4})\b`,
@@ -110,41 +107,63 @@ const VALUE_SHAPES: Record<ProtectedKind, string> = {
   redacted: PLAIN_VALUE,
 };
 
-function labelPattern(kind: ProtectedKind): string {
-  const spell = (key: string) => [...key].join(String.raw`[_.\s-]*`);
-  const keys = [...new Set(PROTECTED_KEYS[kind].flatMap((key) => {
-    const spelling = compactKey(key);
-    const singular = singularKey(spelling);
-    const plural = /[^aeiou]y$/.test(singular) ? singular.slice(0, -1) + "ies" : /(?:s|x|z|ch|sh)$/.test(singular) ? singular + "es" : singular + "s";
-    return [spelling, normalizeKey(key), singular, plural];
-  }))].sort((a, b) => b.length - a.length);
-  const prefix = PERSON_PREFIXES.map((key) => spell(normalizeKey(key))).join("|");
-  const known = keys.map((key) => (key !== "name" && key.endsWith("name") ? String.raw`[\w. -]*` : "") + spell(key)).join("|");
-  const unknown = kind === "redacted" ? String.raw`|(?:${prefix})[\w. -]+(?=["']?\s*[:=#])` : "";
-  return String.raw`(?:[\w-]+[./:])*(?:(?:${prefix})[_.\s-]*)?(?:${known}${unknown})[_.-]*(?:(?<=#)|(?=["']?(?:\s*[:=#]|\s+)))`;
-}
+const PLAIN_VALUES = Object.fromEntries(Object.entries(VALUE_SHAPES).map(([kind, shape]) => [kind, new RegExp(shape, "iyu")])) as Record<ProtectedKind, RegExp>;
 
-function labelRule(kind: ProtectedKind): [RegExp, (m: string, ...groups: string[]) => string] {
-  const whole = kind === "name" || kind === "redacted";
-  return [
-    labelledValue(labelPattern(kind), VALUE_SHAPES[kind], "giu", whole ? QUOTED_VALUE : VALUE_SHAPES[kind]),
-    (m, label, sep, quote) => {
-      if (patientFieldKind(label!) !== kind) return m;
-      return kind === "name" ? `${label}${sep}${quote ?? ""}[name]${quote ?? ""}` : `[${kind}]`;
-    },
-  ];
+function labelledValues(text: string): string {
+  const starts = /(?<![\w."'-])["']?[a-z0-9_]/giu;
+  let out = "";
+  let from = 0;
+  for (let start; (start = starts.exec(text));) {
+    const at = start.index;
+    const keyQuote = /["']/.test(text[at]!) ? text[at]! : "";
+    let selected: { at: number; kind: ProtectedKind; end: number; prefix: string; quote: string } | undefined;
+    for (let end = at + 1; end <= Math.min(text.length, at + 42); end++) {
+      const label = text.slice(at + keyQuote.length, end);
+      if (keyQuote ? text[end] !== keyQuote : /\s$/.test(label)) continue;
+      if (!/^[\w .#/:\t-]{1,40}$/.test(label)) break;
+      const keyEnd = end + keyQuote.length;
+      const sep = /^(?:[ \t]*[:=#][ \t]*|[ \t]+)/.exec(text.slice(keyEnd))?.[0] ?? (text[keyEnd - 1] === "#" ? "" : undefined);
+      let kind = sep === undefined ? undefined : patientFieldKind(label);
+      let labelAt = at;
+      if (kind && !keyQuote && !KEY_KINDS.has(singularKey(normalizeKey(label)))) for (let offset = 1; offset < label.length; offset++) {
+        if (!/[ \t]/.test(label[offset - 1]!) || /\s/.test(label[offset]!)) continue;
+        const suffix = patientFieldKind(label.slice(offset));
+        if (suffix) {
+          kind = suffix;
+          labelAt = at + offset;
+          if (KEY_KINDS.has(singularKey(normalizeKey(label.slice(offset))))) break;
+        }
+      }
+      if (kind) {
+        const valueAt = keyEnd + sep!.length;
+        const quoted = /["']/.test(text[valueAt] ?? "");
+        const valuePattern = quoted ? QUOTED_VALUE : PLAIN_VALUES[kind];
+        valuePattern.lastIndex = valueAt;
+        const value = valuePattern.exec(text);
+        if (value) {
+          const identifier = kind !== "name" && kind !== "redacted";
+          const normalized = singularKey(normalizeKey(text.slice(labelAt, end)));
+          const known = KEY_KINDS.has(normalized) || KEY_KINDS.has(normalized.replace(PERSON_PREFIX, ""));
+          if (!selected || identifier && (selected.kind === "name" || selected.kind === "redacted" || selected.kind === kind) || kind === "redacted" && known && (selected.kind === "name" || selected.kind === "redacted")) {
+            selected = { at: labelAt, kind, end: valuePattern.lastIndex, prefix: text.slice(labelAt, valueAt), quote: quoted ? text[valueAt]! : "" };
+          }
+        }
+      }
+      if (keyQuote) break;
+    }
+    if (!selected) continue;
+    out += text.slice(from, selected.at) + (selected.kind === "name" ? `${selected.prefix}${selected.quote}[name]${selected.quote}` : `[${selected.kind}]`);
+    from = selected.end;
+    starts.lastIndex = from;
+  }
+  return out + text.slice(from);
 }
 
 const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
-  ...Object.keys(PROTECTED_KEYS).filter((kind) => kind !== "name").map((kind) => labelRule(kind as ProtectedKind)),
   [/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "[email]"],
   [/\b\d{3}-\d{2}-\d{4}\b/g, "[ssn]"],
   [/\+\d{10,15}(?!\d)/g, "[phone]"],
   [/(?<![\w.])(?:1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?![\w.])/g, "[phone]"],
-  // Smith, Jane / SMITH, JANE
-  [new RegExp(String.raw`\b(?:${CAP_WORD}|${UPPER_WORD}),\s?(?:${CAP_WORD}|${UPPER_WORD})(?:\s\p{Lu}\.?)?(?![\p{L}])`, "gu"), nameUnlessCommon],
-  // resident: Jane Doe / patient="JOHN SMITH" / name=Smith
-  labelRule("name"),
   // Dr Smith, Mrs. Jane Doe, NP Jones
   [
     new RegExp(String.raw`\b(Dr|Doctor|Mr|Mrs|Ms|Miss|Mx|Prof|Nurse|NP|RN|LPN|PA)\.?\s+${CAP_WORD}(?:\s+${CAP_WORD})?`, "gu"),
@@ -175,7 +194,7 @@ export function maskText(text: string, stats: RedactStats = { droppedFields: 0 }
     } catch {}
   }
   const mask = (s: string) => {
-    let out = fold(s);
+    let out = labelledValues(fold(s).replace(COMMA_NAMES, nameUnlessCommon));
     for (const [re, to] of RULES) out = out.replace(re, to as never);
     return out;
   };
