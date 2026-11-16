@@ -18,7 +18,8 @@ function tokens(text: string): Token[] {
       }
       i++;
       out.push({ kind: "literal", value: quote === "/" ? new RegExp(value.replace("(?i)", ""), value.includes("(?i)") ? "i" : "") : value });
-    } else if (/[(),\[\]=]/.test(c)) { out.push({ kind: c, value: c }); i++; }
+    } else if (text.startsWith(">=", i) || text.startsWith("<=", i)) { out.push({ kind: "operator", value: text.slice(i, i + 2) }); i += 2; }
+    else if (/[(),\[\]=]/.test(c)) { out.push({ kind: c, value: c }); i++; }
     else {
       const word = /^[\w@.\-]+/.exec(text.slice(i))?.[0];
       if (!word) throw new Error(`unexpected query token: ${text.slice(i)}`);
@@ -71,6 +72,12 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     const t = input[at++];
     if (!t) throw new Error("missing query operand");
     if (t.kind === "literal") return t.value;
+    if (t.value.toLowerCase() === "tomillis") {
+      take("(");
+      const timestamp = primary();
+      take(")");
+      return typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+    }
     return lookup(t.value);
   };
   const compare = (): any => {
@@ -91,6 +98,11 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       while (!is(close)) { choices.push(primary()); if (!is(",")) break; at++; }
       take(close);
       return apply((value) => choices.includes(value));
+    }
+    if (op === ">=" || op === "<=") {
+      at++;
+      const right = primary();
+      return apply((value) => op === ">=" ? value >= right : value <= right);
     }
     if (["=", "like", "regexp", "contains"].includes(op)) {
       at++;

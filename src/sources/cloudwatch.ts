@@ -67,7 +67,7 @@ const list = (xs: string[]) => "[" + xs.map((x) => JSON.stringify(x)).join(", ")
 
 /** The Insights query for a LogQuery. Exported for tests. */
 export function buildQuery(q: LogQuery): string {
-  const filters: string[] = [];
+  const filters: string[] = [`toMillis(@timestamp) >= ${q.start} and toMillis(@timestamp) <= ${q.end}`];
   if (q.service && q.service !== "-") {
     const names = serviceAliases(q.service);
     filters.push(`(service in ${list(names)} or @logStream like /^(${names.map(reEscape).join("|")})\\//)`);

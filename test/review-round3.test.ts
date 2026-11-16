@@ -172,7 +172,7 @@ it.each([
   [{ service: "" }, "", "-"],
 ] as const)("CloudWatch service precedence agrees for rendering, selection and count queries: %j", (body, stream, expected) => {
   const message = JSON.stringify({ level: "error", msg: "failed", ...body });
-  const fields = { ...body, level: "error", "@message": message, "@logStream": stream };
+  const fields = { ...body, "@timestamp": NOW - 1000, level: "error", "@message": message, "@logStream": stream };
   expect(cwRow([{ field: "@message", value: message }, { field: "@logStream", value: stream }]).service).toBe(expected);
   expect(insightsFields(buildQuery({ ...range, service: expected === "-" ? "-" : "case", limit: 10 }), fields)).toBeDefined();
   expect(matchesRecord(cwRow([{ field: "@message", value: message }, { field: "@logStream", value: stream }]), { service: "other" })).toBe(false);

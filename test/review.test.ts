@@ -169,7 +169,7 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
   for (const [spelling, expected] of spellings) for (const field of ["level", "severity", "severity_text"]) {
     it(`${field}=${spelling} selects and counts as ${expected}`, () => {
       const body = JSON.stringify({ [field]: spelling, msg: "ordinary request" });
-      const cwFields = { [field]: spelling, msg: "ordinary request", "@message": body };
+      const cwFields = { "@timestamp": NOW - 1000, [field]: spelling, msg: "ordinary request", "@message": body };
       const szFields = { body, severity_text: "INFO" };
       expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
       expect(szRow({ data: { body, severity_text: "INFO" } }).level).toBe(expected);
@@ -198,7 +198,7 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
     ["Error: connection refused", "error"], ["panic: Error", "fatal"], ["Traceback: failed", "error"],
     ["Warning: slow", "warn"], ["noteworthy request", "-"], ["errorless", "-"], ["{Error: broken", "error"], ['{"error":"failed"}', "error"],
   ])("infers %s consistently as %s", (body, expected) => {
-    const cwFields = { "@message": body };
+    const cwFields = { "@timestamp": NOW - 1000, "@message": body };
     const szFields = { body, severity_text: "" };
     expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
     expect(szRow({ data: szFields }).level).toBe(expected);

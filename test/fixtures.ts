@@ -185,7 +185,7 @@ export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], res
         return { queryId: "q-1" };
       }
       const q = last!.queryString;
-      const selected = evs.filter((e) => insightsFields(q, { ...JSON.parse(line(e)), "@message": line(e), "@logStream": `${e.service.replace(/-service$/, "")}/container/task` }));
+      const selected = evs.filter((e) => insightsFields(q, { ...JSON.parse(line(e)), "@timestamp": e.time, "@message": line(e), "@logStream": `${e.service.replace(/-service$/, "")}/container/task` }));
       const res = cloudwatchResults(newest(selected, last!.limit));
       rec.responses.push(res);
       return res;

@@ -10,9 +10,9 @@ const range = { start: 1_000_000, end: 2_000_000 };
 describe("cloudwatch", () => {
   it("builds an Insights query from the shared filters", () => {
     const q = buildQuery({ ...range, service: "case", minLevel: "error", text: "pay.er", id: "abc-123", limit: 50 });
-    expect(insightsFields(q, { service: "case", level: "error", "@message": "pay.er abc-123", "@logStream": "other/container/task" })).toBeDefined();
-    expect(insightsFields(q, { service: "case", level: "critical", "@message": "pay.er abc-123" })).toBeDefined();
-    expect(insightsFields(q, { service: "case", level: "info", "@message": "pay.er abc-123" })).toBeUndefined();
+    expect(insightsFields(q, { "@timestamp": range.start, service: "case", level: "error", "@message": "pay.er abc-123", "@logStream": "other/container/task" })).toBeDefined();
+    expect(insightsFields(q, { "@timestamp": range.start, service: "case", level: "critical", "@message": "pay.er abc-123" })).toBeDefined();
+    expect(insightsFields(q, { "@timestamp": range.start, service: "case", level: "info", "@message": "pay.er abc-123" })).toBeUndefined();
     expect(q).toContain("@message like /(?i)pay\\.er/");
     expect(q).toContain('@message like "abc-123"');
     expect(q).toMatch(/sort @timestamp desc\n\| limit 50$/);

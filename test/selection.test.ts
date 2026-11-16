@@ -42,7 +42,7 @@ function cloudwatchWire(rows: Row[], stream = "case/container/task") {
     const selected = rows.filter((r) => {
       let data = {};
       try { data = JSON.parse(r.data.body); } catch {}
-      return insightsFields(last.queryString, { ...data, "@message": r.data.body, "@logStream": stream });
+      return insightsFields(last.queryString, { ...data, "@timestamp": r.timestamp, "@message": r.data.body, "@logStream": stream });
     }).slice(0, last.limit);
     return { status: "Complete", results: selected.map((r) => [{ field: "@timestamp", value: r.timestamp }, { field: "@message", value: r.data.body }, { field: "@logStream", value: stream }]) };
   };
@@ -172,6 +172,63 @@ it("CloudWatch trace uses its requested limit for provider-only substring matchi
   expect(result.rows).toHaveLength(1);
   expect(wire.requests).toHaveLength(1);
   expect(wire.requests[0].limit).toBe(1);
+});
+
+it("CloudWatch applies inclusive millisecond bounds before limiting every command", async () => {
+  const base = Date.parse("2026-11-16T14:00:00.000Z");
+  const input = [1900, 1101, 1100, 1000, 900, 899].map((offset, i) => ({
+    ...row({ level: "error", service: "case", msg: "Error handling request req-123", requestId: "req-123", marker: `at-${offset}` }, i),
+    timestamp: new Date(base + offset).toISOString(),
+  }));
+  let selected: Row[] = [];
+  const transport = async (command: any) => {
+    if (command.constructor.name === "StartQueryCommand") {
+      const request = command.input;
+      selected = input.filter((entry) => Date.parse(entry.timestamp) >= request.startTime * 1000 && Date.parse(entry.timestamp) <= request.endTime * 1000);
+      for (const stage of request.queryString.split("\n")) {
+        if (stage.startsWith("| filter ")) selected = selected.filter((entry) => evaluate(stage.slice(9), { ...JSON.parse(entry.data.body), "@timestamp": entry.timestamp, "@message": entry.data.body, "@logStream": "case/container/task" }));
+        else if (stage === "| sort @timestamp desc") selected.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+        else if (stage.startsWith("| limit ")) selected = selected.slice(0, Number(stage.slice(8)));
+      }
+      selected = selected.slice(0, request.limit);
+      return { queryId: "range-query" };
+    }
+    return { status: "Complete", results: selected.map((entry) => [{ field: "@timestamp", value: entry.timestamp }, { field: "@message", value: entry.data.body }, { field: "@logStream", value: "case/container/task" }]) };
+  };
+  const deps = { config: TEST_CONFIG, now: NOW, transports: { cloudwatch: transport } };
+  const from = new Date(base + 900).toISOString();
+  const until = new Date(base + 1100).toISOString();
+  const execute = async (...command: string[]) => {
+    const result = await run(["cloudwatch", "dev", ...command, "--from", from, "--until", until, "--json"], deps);
+    expect(result.code).toBe(0);
+    return JSON.parse(result.out);
+  };
+  for (const command of [["tail"], ["search", "req-123"], ["trace", "req-123"]]) {
+    const result = await execute(...command, "--limit", "1");
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].ctx).toContain("marker=at-1100");
+  }
+  expect((await execute("errors")).scanned).toBe(3);
+  expect((await execute("services")).services).toEqual([{ service: "case", lines: 3, errors: 3, warns: 0 }]);
+  const fields = await execute("fields");
+  expect(fields.sampled).toBe(3);
+  expect(fields.fields.find((field: any) => field.field === "marker").examples).toBe("at-1100 | at-1000 | at-900");
+});
+
+it.each(["traceId", "trace_id", "requestId", "correlationId", "caseId", "runId"])("SigNoz compares hexadecimal %s case-insensitively in body and attribute fields", async (field) => {
+  const lower = "4bf92f3577b34da6a3ce929d0e0e4736";
+  const upper = "4BF92F3577B34DA6A3CE929D0E0E4736";
+  for (const [stored, lookup] of [[lower, upper], [upper, lower]]) {
+    const input = [row({ [field]: stored, msg: "body match" }), row("attribute match", 1, { attributes_string: { [field]: stored } })];
+    const wire = signozWire(input);
+    const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
+    expect((await source.query({ ...range, id: lookup, limit: 10 })).rows.map((record) => record.msg)).toEqual(["body match", "attribute match"]);
+    expect((await source.query({ ...range, id: "00000000000000000000000000000001", limit: 10 })).rows).toEqual([]);
+  }
+  const wire = signozWire([row({ [field]: "request-A", msg: "case-sensitive operational ID" })]);
+  const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
+  expect((await source.query({ ...range, id: "request-A", limit: 1 })).rows).toHaveLength(1);
+  expect((await source.query({ ...range, id: "request-a", limit: 1 })).rows).toEqual([]);
 });
 
 it("SigNoz counts each provider ID once when a late arrival shifts the next offset page", async () => {

@@ -41,8 +41,13 @@ export function matchesRecord(record: LogRecord, query: Pick<LogQuery, "minLevel
   if (query.minLevel && !levelsAtLeast(query.minLevel).includes(record.level as Level)) return false;
   if (query.service && !serviceAliases(query.service).includes(record.service)) return false;
   if (query.id) {
-    const traceMatch = record.traceId === query.id || (/^[0-9a-f]{32}$/i.test(query.id) && record.traceId?.toLowerCase() === query.id.toLowerCase());
-    if (!traceMatch && !ID_FIELDS.some((key) => str(record.fields[key]) === query.id)) return false;
+    const hex = /^[0-9a-f]{32}$/i.test(query.id);
+    const target = hex ? query.id.toLowerCase() : query.id;
+    const sameId = (value: unknown) => {
+      const id = str(value);
+      return id !== undefined && (hex ? id.toLowerCase() : id) === target;
+    };
+    if (!sameId(record.traceId) && !ID_FIELDS.some((key) => sameId(record.fields[key]))) return false;
   }
   return true;
 }
