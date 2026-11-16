@@ -1,17 +1,9 @@
 /**
- * Patient-data redaction, on by default. Two layers:
- *
- * 1. Fields: known patient-data keys (names, birth dates, contact details, insurance
- *    numbers, drugs, diagnoses, room/bed) are dropped whole, at any depth. Keys that
- *    are ids (`caseId`, `residentId`), counts and service names stay.
- * 2. Free text: every remaining string (the message included) is masked for direct
- *    identifiers (email, phone, SSN, DOB, MRN, member/Rx numbers) and anything
- *    name-shaped: titled names (`Dr Smith`), labelled names (`resident: Jane Doe`),
- *    `Last, First`, and runs of capitalized words that are not common log vocabulary.
+ * Patient-data redaction; the user-facing contract lives in README.md#redaction.
  *
  * It errs toward masking: a capitalized product word may come out as `[name]`, which
  * costs a little meaning; the opposite error puts a resident's name in an agent's
- * context. `--unredacted` turns this off and prints a warning.
+ * context.
  *
  * ponytail: the name heuristics are a denylist of shapes, not de-identification. An
  * all-lowercase name in prose survives. Upgrade path: an allowlist of fields per

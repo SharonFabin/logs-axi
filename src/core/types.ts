@@ -25,7 +25,7 @@ export interface TimeRange {
 }
 
 export interface LogQuery extends TimeRange {
-  /** Case-insensitive substring of the message. */
+  /** Case-insensitive substring of the raw log body. */
   text?: string;
   /** Lines at this level or above. */
   minLevel?: Level;

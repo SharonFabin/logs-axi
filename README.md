@@ -33,7 +33,8 @@ mkdir -p ~/.config/logs-axi && cp "$(npm root -g)/logs-axi/config.example.json" 
 logs-axi            # shows what is configured
 ```
 
-The config (`$LOGS_AXI_CONFIG`, else `~/.config/logs-axi/config.json`) maps
+The config (`$LOGS_AXI_CONFIG`, else `$XDG_CONFIG_HOME/logs-axi/config.json` when
+`XDG_CONFIG_HOME` is set, else `~/.config/logs-axi/config.json`) maps
 `sources.<source>.<env>` to that source's settings. The example ships the Point360
 values: CloudWatch log groups `/point360/dev` and `/point360/prod` in us-east-1 through
 the `Point360-Admin` profile, and SigNoz on the local end of each environment's SSM
@@ -62,9 +63,9 @@ start the port-forward above, then
 | command | what | defaults |
 |---|---|---|
 | `tail` | latest lines, oldest first | `--since 15m --limit 50` |
-| `search [text]` | case-insensitive text, `--level`, `--service`, time range | `15m`, `50` |
+| `search [text]` | case-insensitive text in the raw log body, `--level`, `--service`, time range | `15m`, `50` |
 | `errors` | error lines grouped by normalized message template: count, first/last seen, one id to follow | `15m`, 20 groups from up to 1000 lines |
-| `trace <id>` | every line carrying one trace/request/case/run id, across services | `24h`, `200` |
+| `trace <id>` | latest lines carrying one trace/request/correlation/case/run id, across services | `24h`, `200` |
 | `services` | line, error and warning counts per service | `1h` |
 | `fields` | field names in a 200-line sample, how often seen, examples | `1h` |
 
@@ -73,10 +74,20 @@ also matches `case-service`), `--level <lvl>` (that level and above), `--limit <
 `--full` (messages over 200 chars and values over 80 are cut with `…[+N]` otherwise),
 `--json`, `--unredacted`. `logs-axi <source> <env>` alone runs `errors`.
 
+Flags vary by command. Run `logs-axi <source> <env> <command> --help` for its
+supported flags.
+
+CloudWatch `trace` matches the ID anywhere in the raw log line. SigNoz matches
+structured `traceId`, `trace_id`, `requestId`, `correlationId`, `caseId` and `runId`
+values from JSON bodies or attributes, plus native `trace_id` for 32-hex IDs.
+Both sources match 32-hex IDs case-insensitively; other IDs are case-sensitive,
+with substring matching on CloudWatch and exact matching on SigNoz.
+
 Queries scan at most 10,000 candidate rows, with service counts calculated from normalized rows.
-When coverage may be incomplete, output includes `partial: true` and a warning that counts are
-lower bounds. Narrow `--since` to improve coverage. Redacted search hints use a placeholder
-for the search text.
+When that cap prevents filling a query, or service counts reach the cap, output includes
+`partial: true` and a warning that counts are lower bounds. Separately, `errors` warns
+when its 1000-line sample fills. Narrow `--since` to improve coverage. Redacted search
+hints use a placeholder for the search text.
 
 Exit codes: 0 success (empty results included), 1 error, 2 usage error. Errors print to
 stdout as `error:` plus help lines that say how to fix them.
@@ -89,11 +100,13 @@ On by default (`src/lib/redact.ts`):
   `prescriber`, `firstName`, ...), DOB, SSN/MRN, phone, email, address, member/policy/Rx
   numbers, NPI, drugs, diagnoses, allergies, room/bed. Ids (`caseId`, `residentId`,
   uuids), counts and service names stay. The output says how many fields were dropped.
-- **Free text** (the message and every remaining string) is masked: emails, phones, SSNs,
-  DOBs, MRNs, member/Rx numbers, rooms, titled names (`Dr [name]`), labelled names
-  (`resident: [name]`), `Last, First`, and runs of capitalized words that are not common
-  log vocabulary.
-- `errors` shows templates computed after masking, never raw payloads.
+- **Free text** (messages and non-structural field keys and string values) is masked:
+  emails, phones, SSNs, DOBs, MRNs, member/Rx numbers, rooms, titled names (`Dr [name]`),
+  labelled names (`resident: [name]`), `Last, First`, and runs of capitalized words that
+  are not common log vocabulary. Structural string fields such as service names and trace/request IDs
+  are preserved. JSON objects and arrays embedded in messages and non-structural
+  string values are recursively redacted.
+- With redaction enabled, `errors` shows templates computed after masking, never raw payloads.
 
 `--unredacted` turns this off and puts a warning first in the output. It is never the
 default. The heuristics err toward over-masking; an all-lowercase name in prose is the

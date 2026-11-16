@@ -9,7 +9,6 @@ import { usageError } from "./errors.js";
 export interface FlagSpec {
   type: "string" | "boolean";
   description: string;
-  /** Alternate spellings (e.g. { "-s": "state" }) handled by the caller's map. */
 }
 
 export type FlagSchema = Record<string, FlagSpec>;

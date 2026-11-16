@@ -18,14 +18,15 @@ logs-axi signoz dev errors --since 1h --service case
 ```
 
 Sources: `cloudwatch`, `signoz`. Environments (`dev`, `prod`) come from
-`~/.config/logs-axi/config.json` (see `config.example.json` in the package). Output is
+the config file (see [config locations](../../README.md#install-and-configure) and
+`config.example.json` in the package). Output is
 [TOON](https://toonformat.dev/): rows are `a,b,c` under a `name[N]{cols}:` header,
 followed by `help[N]:` lines with the next commands to run.
 
 ## Setup
 
 - Install: `npm install -g github:SharonFabin/logs-axi`.
-- Config: copy `config.example.json` to `~/.config/logs-axi/config.json` (or set `LOGS_AXI_CONFIG`).
+- Config: follow [Install and configure](../../README.md#install-and-configure) for file locations and setup.
 - CloudWatch uses the AWS profile in the config; if it errors on credentials, run
   `aws sso login --profile Point360-Admin`.
 - SigNoz is reached through an SSM port-forward (`terraform output -raw signoz_ui_command`
@@ -54,27 +55,17 @@ followed by `help[N]:` lines with the next commands to run.
 
 ## Commands
 
-```
-tail                 latest lines, oldest first            default --since 15m --limit 50
-search [text]        positional text (case-insensitive) / --level / --service   15m, 50
-errors               error lines grouped by template        15m, --limit = groups (20)
-trace <id>           every line with that trace/request/case/run id   24h, 200
-services             line, error and warning counts per service       1h
-fields               field names, how often seen, examples (sampled)  1h
-```
-
-Flags: `--since 15m|1h|2d` or `--from/--until <ISO>`, `--service <name>` (`case` and
-`case-service` both match), `--level debug|info|warn|error|fatal` (that level and above),
-`--limit <n>`, `--full` (do not cut long values), `--json`.
+See the [command and flag reference](../../README.md#commands) for commands, defaults,
+matching rules and sampling limits. Run `logs-axi <source> <env> <command> --help`
+for its supported flags.
 
 ## Tips
 
 - `logs-axi <source> <env>` with no command runs `errors`.
 - Messages over 200 chars and field values over 80 are cut with `…[+N]`; add `--full`.
-- `errors` scans the newest 1000 matching lines; when it says counts are lower bounds,
-  narrow `--since` or add `--service`.
-- CloudWatch `trace <id>` matches the id anywhere in the line (request, case, run ids).
-  SigNoz `trace` matches a 32-hex trace id, otherwise the requestId/correlationId/caseId/runId attributes.
+- When `errors` says counts are lower bounds, narrow `--since` or add `--service`;
+  see [query and sampling limits](../../README.md#commands).
+- Trace matching differs by source; see [trace matching](../../README.md#commands).
 - Exit codes: 0 success (including empty results), 1 error, 2 usage error. Errors print
   to stdout as `error:` with fix-it help lines.
 
