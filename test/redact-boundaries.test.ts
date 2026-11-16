@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CloudWatchLogsClient } from "@aws-sdk/client-cloudwatch-logs";
 import { run } from "../src/cli.js";
-import { PROTECTED_KEYS, isPatientField, maskText, redactObject } from "../src/lib/redact.js";
+import { PROTECTED_KEYS, isPatientField, maskText, redactObject, redactRecord } from "../src/lib/redact.js";
 import { cloudwatch } from "../src/sources/cloudwatch.js";
 import { signoz } from "../src/sources/signoz.js";
 import { NOW, TEST_CONFIG, cloudwatchStub, events, signozStub } from "./fixtures.js";
@@ -92,10 +92,10 @@ it.each(["caseId", "residentId", "requestId", "correlationId", "traceId", "runId
 it.each([
   ['lookup failed first name Will; retry', 'lookup failed first name [name]; retry'],
   ['lookup failed first_name J; retry', 'lookup failed first_name [name]; retry'],
-  ['request failed {"social_security_number":"123456789"', 'request failed {[ssn]'],
-  ['request failed {"patient.social-security-number":"123456789"', 'request failed {[ssn]'],
+  ['request failed {"social_security_number":"123456789"', 'request failed {"social_security_number":"[ssn]"'],
+  ['request failed {"patient.social-security-number":"123456789"', 'request failed {"patient.social-security-number":"[ssn]"'],
   ['request failed {"ssn#":"123456789"}', 'request failed {}'],
-  ['request failed {"ssn#":"123456789"', 'request failed {[ssn]'],
+  ['request failed {"ssn#":"123456789"', 'request failed {"ssn#":"[ssn]"'],
   ...["member", "subscriber", "policy", "medicaid", "medicare", "mbi", "beneficiary", "insurance"].flatMap((label) => ["#", "no", "num", "number"].map((suffix) => [`failed ${label} ${suffix}${suffix === "#" ? "" : " "}INS12345; retry`, "failed [id]; retry"])),
 ])("masks the reported protected-label fragment %s", (input, expected) => {
   expect(maskText(input)).toBe(expected);
@@ -123,8 +123,58 @@ it.each([
   }
   for (const keyQuote of ['"', "'"]) for (const valueQuote of ['"', "'"]) for (const suffix of ["", ',"requestId":"987654321","caseId":"case-1"']) {
     const prefix = 'request failed {"requestId":"987654321","caseId":"case-1",';
-    expect(maskText(`${prefix}${keyQuote}${key}${keyQuote}:${valueQuote}${value}${suffix}`)).toBe(`${prefix}${replacement}${suffix}`);
+    const output = maskText(`${prefix}${keyQuote}${key}${keyQuote}:${valueQuote}${value}${suffix}`);
+    expect(output).not.toContain(value);
+    expect(output).toContain(replacement);
+    expect(output).toContain(`${keyQuote}${key}${keyQuote}:`);
+    expect(output).toContain('"requestId":"987654321"');
+    expect(output).toContain('"caseId":"case-1"');
   }
+});
+
+it.each([
+  ["patient: jane room 12B", "patient: [name]"],
+  ["patient: jane room: 12B", "patient: [name] [room]"],
+  ['failed {"ssns":["123456789"],"requestId":"req-1"', 'failed {"ssns":["[ssn]"],"requestId":"req-1"'],
+])("protects the reported overlap or container %s", (input, expected) => {
+  expect(maskText(input)).toBe(expected);
+});
+
+it.each(["ssns", "mrns", "memberIds", "names", "medications", "diagnoses", "unknown"])("masks every quoted value inside malformed %s containers", (key) => {
+  const input = `failed {"${key}":[["123456789"],{"nested":["A12345","jane","apixaban"]}],"count":123456,"requestId":"1234567890"`;
+  const output = maskText(input);
+  for (const value of ["123456789", "A12345", "jane", "apixaban", "123456"]) {
+    expect(output.replace('"requestId":"1234567890"', "")).not.toContain(value);
+  }
+  expect(output).toContain(`"${key}":`);
+  expect(output).toContain('"nested":');
+  expect(output).toContain('"requestId":"1234567890"');
+});
+
+it.each(["requestId", "correlationId", "caseId", "runId", "traceId", "trace_id", "residentId", "patientId", "orgId", "facilityId"])("never applies patient heuristics to approved %s values", (key) => {
+  for (const spelling of [key, `${key}s`, key.replace(/Id$/, "_id"), `${key.replace(/Id$/, "_id")}s`]) {
+    for (const value of ["1234567890", "123-45-6789", "Jane Testperson", ["1234567890", "SSN: 123456789", "Jane Testperson"]]) {
+      const fields = { [spelling]: value };
+      expect(redactObject(fields, { droppedFields: 0 })).toEqual(fields);
+      const json = JSON.stringify(fields);
+      expect(maskText(json)).toBe(json);
+      expect(maskText(json.slice(0, -1))).toBe(json.slice(0, -1));
+    }
+  }
+  expect(redactRecord({ time: "t", level: "error", service: "case-service", msg: "failed", fields: { [key]: "1234567890" } }, { droppedFields: 0 }).fields[key]).toBe("1234567890");
+});
+
+it.each(["cloudwatch", "signoz"] as const)("%s error samples retain numeric operational IDs for follow-up traces", async (source) => {
+  const event = { ...events(1)[0]!, level: "error", msg: "failed", traceId: undefined, fields: { caseId: "1234567890" } };
+  const deps = { config: TEST_CONFIG, now: NOW, transports: { [source]: source === "cloudwatch" ? cloudwatchStub([event]) : signozStub([event]) } };
+  const result = await run([source, "dev", "errors", "--json"], deps);
+  expect(result.code).toBe(0);
+  const output = JSON.parse(result.out);
+  expect(output.groups[0].sample).toBe("1234567890");
+  expect(output.help.join(" ")).toContain("trace 1234567890");
+  const traced = await run([source, "dev", "trace", output.groups[0].sample, "--json"], deps);
+  expect(traced.code).toBe(0);
+  expect(JSON.parse(traced.out).lines).toHaveLength(1);
 });
 
 it("runs exact, person-name and prefix rules on normalized singular fields, preserving operational IDs and service names", () => {

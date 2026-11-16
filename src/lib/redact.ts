@@ -34,6 +34,9 @@ const KEEP_SUFFIX = /(id|ids|count|counts|total)$/;
 
 /** Fields that are structure, not content: never masked. */
 const STRUCTURAL = new Set(["service", "level", "time", "traceId", "spanId", "requestId", "correlationId"]);
+const OPERATIONAL_IDS = new Set(["requestid", "correlationid", "caseid", "runid", "traceid", "residentid", "patientid", "orgid", "facilityid"]);
+const isOperationalId = (key: string) => OPERATIONAL_IDS.has(singularKey(normalizeKey(key)));
+const FRAGMENT_STRUCTURAL = new Set(["level", "severity", "severitytext", "service", "servicename", "msg", "message", "time", "timestamp"]);
 
 function singularKey(key: string): string {
   if (key.endsWith("ies")) return key.slice(0, -3) + "y";
@@ -111,12 +114,11 @@ const PLAIN_VALUES = Object.fromEntries(Object.entries(VALUE_SHAPES).map(([kind,
 
 function labelledValues(text: string): string {
   const starts = /(?<![\w."'-])["']?[a-z0-9_]/giu;
-  let out = "";
-  let from = 0;
+  const spans: { at: number; end: number; replacement: string }[] = [];
   for (let start; (start = starts.exec(text));) {
     const at = start.index;
     const keyQuote = /["']/.test(text[at]!) ? text[at]! : "";
-    let selected: { at: number; kind: ProtectedKind; end: number; prefix: string; quote: string } | undefined;
+    let selected: { at: number; labelAt: number; kind: ProtectedKind; end: number; replacement: string } | undefined;
     for (let end = at + 1; end <= Math.min(text.length, at + 42); end++) {
       const label = text.slice(at + keyQuote.length, end);
       if (keyQuote ? text[end] !== keyQuote : /\s$/.test(label)) continue;
@@ -145,18 +147,56 @@ function labelledValues(text: string): string {
           const normalized = singularKey(normalizeKey(text.slice(labelAt, end)));
           const known = KEY_KINDS.has(normalized) || KEY_KINDS.has(normalized.replace(PERSON_PREFIX, ""));
           if (!selected || identifier && (selected.kind === "name" || selected.kind === "redacted" || selected.kind === kind) || kind === "redacted" && known && (selected.kind === "name" || selected.kind === "redacted")) {
-            selected = { at: labelAt, kind, end: valuePattern.lastIndex, prefix: text.slice(labelAt, valueAt), quote: quoted ? text[valueAt]! : "" };
+            const candidate = { at: kind === "name" ? valueAt : labelAt, labelAt, kind, end: valuePattern.lastIndex, replacement: kind === "name" && quoted ? `${text[valueAt]}[name]${text[valueAt]}` : `[${kind}]` };
+            if (selected?.kind === "name" && candidate.kind !== "name" && selected.labelAt === candidate.labelAt) selected = candidate;
+            else if (selected && candidate.at < selected.end && selected.at < candidate.end) {
+              if (candidate.at <= selected.at) { selected.kind = candidate.kind; selected.replacement = candidate.replacement; }
+              selected.at = Math.min(selected.at, candidate.at);
+              selected.end = Math.max(selected.end, candidate.end);
+            } else { if (selected) spans.push(selected); selected = candidate; }
           }
         }
       }
       if (keyQuote) break;
     }
     if (!selected) continue;
-    out += text.slice(from, selected.at) + (selected.kind === "name" ? `${selected.prefix}${selected.quote}[name]${selected.quote}` : `[${selected.kind}]`);
-    from = selected.end;
-    starts.lastIndex = from;
+    spans.push(selected);
   }
+  const merged: typeof spans = [];
+  for (const span of spans.sort((a, b) => a.at - b.at || b.end - a.end)) {
+    const last = merged.at(-1);
+    if (last && span.at < last.end) last.end = Math.max(last.end, span.end);
+    else merged.push(span);
+  }
+  let out = "";
+  let from = 0;
+  for (const span of merged) { out += text.slice(from, span.at) + span.replacement; from = span.end; }
   return out + text.slice(from);
+}
+
+function maskFragment(text: string): string {
+  const stack = [{ key: "", safe: false }];
+  let key = "";
+  return text.replace(/(["'])(?:\\[\s\S]?|(?<=\p{L})\1(?=\p{L})|(?!\1)[^\\])*\1?|[{}\[\],:]|[^{}\[\],:"'\r\n]+/gu, (token, quote: string | undefined, at: number) => {
+    const parent = stack.at(-1)!;
+    if (!token.trim() || token === ":") return token;
+    if (token === "{" || token === "[") {
+      stack.push({ key: key || parent.key, safe: parent.safe || isOperationalId(key) || FRAGMENT_STRUCTURAL.has(normalizeKey(key)) });
+      key = "";
+      return token;
+    }
+    if (token === "}" || token === "]") { if (stack.length > 1) stack.pop(); key = ""; return token; }
+    if (token === ",") { key = ""; return token; }
+    if (/^\s*:/.test(text.slice(at + token.length))) {
+      key = quote ? token.slice(1, token.endsWith(quote) ? -1 : undefined) : token.trim();
+      if (quote === '"') { try { key = JSON.parse(token); } catch {} }
+      return token;
+    }
+    if (parent.safe || isOperationalId(key) || FRAGMENT_STRUCTURAL.has(normalizeKey(key))) return token;
+    const kind = patientFieldKind(key) ?? patientFieldKind(parent.key);
+    if (quote || kind || !/^(?:true|false|null|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)$/i.test(token.trim())) return JSON.stringify(`[${kind ?? "redacted"}]`);
+    return token.replace(/[-+]?\b\d{5,}(?:\.\d+)?(?:e[+-]?\d+)?\b/gi, '"[redacted]"');
+  });
 }
 
 const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
@@ -198,36 +238,12 @@ export function maskText(text: string, stats: RedactStats = { droppedFields: 0 }
     for (const [re, to] of RULES) out = out.replace(re, to as never);
     return out;
   };
-  let out = "";
-  let from = 0;
-  for (let start = 0; start < text.length; start++) {
-    if (text[start] !== "{" && text[start] !== "[") continue;
-    let depth = 0;
-    let quoted = false;
-    let escaped = false;
-    for (let end = start; end < text.length; end++) {
-      const c = text[end];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (c === "\\") escaped = true;
-        else if (c === '"') quoted = false;
-      } else if (c === '"') quoted = true;
-      else if (c === "{" || c === "[") depth++;
-      else if (c === "}" || c === "]") depth--;
-      if (depth !== 0 || quoted) continue;
-      let value: unknown;
-      try {
-        value = JSON.parse(text.slice(start, end + 1));
-      } catch {
-        break;
-      }
-      out += mask(text.slice(from, start)) + JSON.stringify(redactValue(value, stats));
-      from = end + 1;
-      start = end;
-      break;
-    }
-  }
-  return out + mask(text.slice(from));
+  const start = text.search(/[\[{]/);
+  if (start < 0) return mask(text);
+  let value: unknown;
+  try { value = JSON.parse(text.slice(start)); }
+  catch { return mask(text.slice(0, start)) + maskFragment(text.slice(start)); }
+  return mask(text.slice(0, start)) + JSON.stringify(redactValue(value, stats));
 }
 
 export interface RedactStats {
@@ -249,11 +265,12 @@ export function redactObject(obj: Record<string, unknown>, stats: RedactStats): 
       continue;
     }
     // a map keyed by people (`{ byResident: { "Jane Doe": 3 } }`) puts the name in the key
-    const base = STRUCTURAL.has(k) ? k : maskText(k, stats);
+    const operational = isOperationalId(k);
+    const base = operational || STRUCTURAL.has(k) ? k : maskText(k, stats);
     let key = base;
     let suffix = 2;
     while (Object.hasOwn(out, key)) key = `${base}#${suffix++}`;
-    Object.defineProperty(out, key, { value: STRUCTURAL.has(k) && typeof v === "string" && !/^[\s]*[\[{"]/.test(v) ? v : redactValue(v, stats), enumerable: true, configurable: true, writable: true });
+    Object.defineProperty(out, key, { value: operational || STRUCTURAL.has(k) && typeof v === "string" && !/^[\s]*[\[{"]/.test(v) ? v : redactValue(v, stats), enumerable: true, configurable: true, writable: true });
   }
   return out;
 }
