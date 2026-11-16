@@ -61,6 +61,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       take(")");
       switch (t.value.toLowerCase()) {
         case "case": {
+          if (Math.floor(args.length / 2) > 10) throw new Error("CloudWatch case supports at most 10 branches");
           for (let i = 0; i + 1 < args.length; i += 2) if (args[i]) return args[i + 1];
           return args.length % 2 ? args.at(-1) : undefined;
         }

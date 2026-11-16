@@ -42,8 +42,8 @@ export function loadConfig(): Config {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
-  } catch (e) {
-    throw new AxiError(`config ${file} is not valid JSON: ${(e as Error).message}`);
+  } catch {
+    throw new AxiError(`config ${file} is not valid JSON`);
   }
   const sources = (parsed as Config | null)?.sources;
   if (!sources || typeof sources !== "object") {

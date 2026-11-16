@@ -45,7 +45,7 @@ const PERSON_NAME = /(first|last|middle|full|given|family|sur|display|user|perso
 const STRUCTURAL = new Set(["service", "level", "time", "traceId", "spanId", "requestId", "correlationId"]);
 
 export function isPatientField(key: string): boolean {
-  const k = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const k = key.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/ids$/, "id");
   if (DROP_EXACT.has(k)) return true;
   if (PERSON_PREFIX.test(k) && DROP_EXACT.has(k.replace(PERSON_PREFIX, ""))) return true;
   if (PERSON_NAME.test(k)) return true;

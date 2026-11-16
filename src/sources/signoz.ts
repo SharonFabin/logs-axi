@@ -61,7 +61,11 @@ function httpTransport(env: SignozEnv, label: string): SignozTransport {
         help: res.status === 401 || res.status === 403 ? [`check the key in ${keyVar}`] : [],
       });
     }
-    return JSON.parse(text);
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new AxiError("signoz: response is not valid JSON");
+    }
   };
 }
 

@@ -1,4 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { loadConfig } from "../src/lib/config.js";
 import { run } from "../src/cli.js";
 import { maskText, redactObject } from "../src/lib/redact.js";
 import { buildQuery, SERVICES_QUERY, parseRow as cwRow } from "../src/sources/cloudwatch.js";
@@ -8,15 +11,19 @@ import { NOW, TEST_CONFIG, cloudwatchResults, cloudwatchStub, events, signozStub
 
 const range = { start: NOW - 3600e3, end: NOW };
 
-it("drops prefixed insurance identifiers before preserving operational IDs", () => {
-  const protectedKeys = ["memberId", "subscriberId", "policyId", "medicaidId", "medicareId", "beneficiaryId", "insuranceId"];
-  const prefixes = ["patient", "resident", "prescriber", "physician", "doctor", "member", "subscriber", "guardian", "caregiver", "contact", "emergencyContact", "nextOfKin", "recipient", "sender"];
-  const fields: Record<string, unknown> = { residentId: "resident-1", caseId: "case-1" };
+it("drops singular and plural insurance identifiers before preserving operational IDs", () => {
+  const protectedKeys = ["memberId", "subscriberId", "policyId", "medicaidId", "medicareId", "beneficiaryId", "insuranceId"].flatMap((key) => [key, `${key}s`]);
+  const prefixes = ["", "patient", "resident", "prescriber", "physician", "doctor", "member", "subscriber", "guardian", "caregiver", "contact", "emergencyContact", "nextOfKin", "recipient", "sender"];
+  const operational = { residentId: "resident-1", residentIds: ["resident-1"], caseId: "case-1", caseIds: ["case-1"], patientIds: ["patient-1"] };
+  const fields: Record<string, unknown> = { ...operational };
   for (const prefix of prefixes) for (const key of protectedKeys) {
-    fields[prefix + key[0]!.toUpperCase() + key.slice(1)] = "SECRET";
-    fields[`${prefix}.${key}`] = "SECRET";
+    const value = key.endsWith("Ids") ? ["INSURANCESECRET"] : "INSURANCESECRET";
+    fields[prefix ? prefix + key[0]!.toUpperCase() + key.slice(1) : key] = value;
+    if (prefix) fields[`${prefix}.${key}`] = value;
   }
-  expect(redactObject(fields, { droppedFields: 0 })).toEqual({ residentId: "resident-1", caseId: "case-1" });
+  expect(redactObject(fields, { droppedFields: 0 })).toEqual(operational);
+  const nested = redactObject({ object: fields, encoded: JSON.stringify(fields), array: [fields] }, { droppedFields: 0 });
+  expect(nested).toEqual({ object: operational, encoded: JSON.stringify(operational), array: [operational] });
 });
 
 it("applies patient-field removal to JSON containers, encoded strings and embedded provider details", () => {
@@ -38,9 +45,9 @@ it("retains all map entries despite recursive anonymization collisions", () => {
 });
 
 describe.each(["cloudwatch", "signoz"] as const)("%s reviewed output paths", (source) => {
-  const event = { ...events(1)[0]!, level: "error", traceId: undefined, msg: 'failed {"mrn":"SECRET-MSG","retry":1}', fields: {
-    patientMedicaidId: "SECRET-ID", residentId: "r-1", details: '{"medication":"apixaban","retry":2}',
-    error: '{"mrn":"SECRET-ERROR","retry":3}', byResident: { "Jane Testperson": 3, "Bob Example": 7 },
+  const event = { ...events(1)[0]!, level: "error", traceId: undefined, msg: 'failed {"mrn":"SECRET-MSG","memberIds":["SECRET-MSG-IDS"],"retry":1}', fields: {
+    patientMedicaidId: "SECRET-ID", patientMedicaidIds: ["SECRET-IDS"], memberIds: ["SECRET-MEMBER-IDS"], residentId: "r-1", details: '{"medication":"apixaban","subscriberIds":["SECRET-DETAIL-IDS"],"retry":2}',
+    error: '{"mrn":"SECRET-ERROR","policyIds":["SECRET-ERROR-IDS"],"retry":3}', byResident: { "Jane Testperson": 3, "Bob Example": 7 },
   } };
   const deps = () => ({ config: TEST_CONFIG, now: NOW, transports: { [source]: source === "cloudwatch" ? cloudwatchStub([event]) : signozStub([event]) } });
   it.each([["tail"], ["search", "failed"], ["trace", "follow-1"], ["errors"], ["fields"]])("redacts %j before output formatting", async (...command) => {
@@ -106,6 +113,54 @@ it("redacts JSON HTTP failures before slicing the response body", async () => {
   try {
     const src = signoz({ endpoint: "http://x", apiKey: "test" }, "t");
     await expect(src.query({ ...range, limit: 1 })).rejects.not.toThrow(/SECRET|apixaban/);
+  } finally {
+    fetch.mockRestore();
+  }
+});
+
+it("enforces AWS's documented maximum of ten case branches in emitted query expressions", () => {
+  const branches = Array.from({ length: 10 }, (_, i) => `${i} = 0, "value-${i}"`);
+  expect(evaluate(`case(${branches.join(", ")}, "default")`, {})).toBe("value-0");
+  expect(() => evaluate(`case(${[...branches, '11 = 0, "eleventh"'].join(", ")}, "default")`, {})).toThrow("at most 10 branches");
+  expect(insightsFields(buildQuery({ ...range, limit: 10 }), { level: "critical", "@message": "ordinary" })!.axiLevel).toBe("fatal");
+  expect(insightsFields(SERVICES_QUERY, { level: "critical", "@message": "ordinary" })!.axiLevel).toBe("fatal");
+});
+
+it("omits V8 parser input excerpts from config errors in commands and the home view", async () => {
+  const directory = fs.mkdtempSync(path.resolve("test/config-diagnostics-"));
+  const file = path.join(directory, "config.json");
+  fs.writeFileSync(file, '{"sources":{"signoz":{"dev":{"apiKey":CONFIGKEYSECRET}}}}');
+  vi.stubEnv("LOGS_AXI_CONFIG", file);
+  try {
+    expect(() => loadConfig()).toThrow(`config ${file} is not valid JSON`);
+    for (const argv of [[], ["signoz", "dev", "tail"]]) {
+      const result = await run(argv);
+      expect(result.code).toBe(argv.length ? 1 : 0);
+      expect(result.out).toContain("is not valid JSON");
+      expect(result.out).not.toContain("CONFIGKEYSECRET");
+    }
+    fs.writeFileSync(file, JSON.stringify(TEST_CONFIG));
+    expect(loadConfig()).toEqual(TEST_CONFIG);
+    expect((await run([])).out).toContain("configured");
+  } finally {
+    vi.unstubAllEnvs();
+    fs.rmSync(directory, { recursive: true });
+  }
+});
+
+it("omits V8 parser input excerpts from malformed successful SigNoz responses", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('{"mrn":MRNSECRET}', { status: 200 }));
+  try {
+    const config = { sources: { signoz: { dev: { endpoint: "http://x", apiKey: "test" } } } };
+    const src = signoz(config.sources.signoz.dev, "t");
+    await expect(src.query({ ...range, limit: 1 })).rejects.toThrow(/^signoz: response is not valid JSON$/);
+    const result = await run(["signoz", "dev", "tail"], { config, now: NOW });
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("response is not valid JSON");
+    expect(result.out).not.toContain("MRNSECRET");
+    fetch.mockImplementation(async () => new Response(JSON.stringify({ status: "success", data: { data: { results: [] } } }), { status: 200 }));
+    expect(await src.query({ ...range, limit: 1 })).toEqual([]);
+    expect((await run(["signoz", "dev", "tail"], { config, now: NOW })).code).toBe(0);
   } finally {
     fetch.mockRestore();
   }

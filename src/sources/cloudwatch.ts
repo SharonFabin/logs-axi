@@ -88,7 +88,10 @@ const LEVEL_QUERY = [
   `| fields case(isempty(level) = 0, level, isempty(severity) = 0, severity, severity_text) as axiRawLevel`,
   `| fields case(isempty(msg) = 0, msg, isempty(message) = 0, message, @message) as axiMessage`,
   "| fields case(" + [
-    ...Object.entries(LEVEL_ALIASES).flatMap(([alias, level]) => [`tolower(axiRawLevel) = ${JSON.stringify(alias)}`, JSON.stringify(level)]),
+    ...levelsAtLeast("debug").flatMap((level) => [
+      `tolower(axiRawLevel) in ${list(Object.entries(LEVEL_ALIASES).filter(([, value]) => value === level).map(([alias]) => alias))}`,
+      JSON.stringify(level),
+    ]),
     ...INFERRED_LEVELS.flatMap(([level, pattern]) => [`isempty(axiRawLevel) = 1 and axiMessage like /(?i)${pattern}/`, JSON.stringify(level)]),
     `case(isempty(axiRawLevel) = 1, "-", tolower(axiRawLevel))`,
   ].join(", ") + ") as axiLevel",
