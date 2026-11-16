@@ -1,3 +1,4 @@
+import { evaluate, insightsFields } from "./query-contract.js";
 /**
  * Synthetic log events and the raw API responses each source would return for them.
  * Everything here is invented: no real log content, names or ids. The people below
@@ -104,9 +105,15 @@ export function cloudwatchResults(evs: Event[]) {
 }
 
 /** Logs Insights results for the services stats query. */
-export function cloudwatchServiceStats(evs: Event[]) {
+export function cloudwatchServiceStats(evs: Event[], query: string) {
   const counts = new Map<string, number>();
-  for (const e of evs) counts.set(`${e.service}\u0000${e.level}`, (counts.get(`${e.service}\u0000${e.level}`) ?? 0) + 1);
+  for (const e of evs) {
+    const wire = JSON.parse(line(e));
+    const selected = insightsFields(query, { ...wire, "@message": line(e), "@logStream": `${e.service}/container/task` });
+    if (!selected) continue;
+    const key = `${e.service}\u0000${selected.axiLevel}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
   return {
     results: [...counts.entries()].map(([k, n]) => {
       const [svc, lvl] = k.split("\u0000");
@@ -177,27 +184,20 @@ export function signozRaw(evs: Event[]) {
 }
 
 /** SigNoz v5 scalar response for count() by service.name, severity_text. */
-export function signozServiceStats(evs: Event[]) {
-  const counts = new Map<string, number>();
-  for (const e of evs) counts.set(`${e.service}\u0000${e.level.toUpperCase()}`, (counts.get(`${e.service}\u0000${e.level.toUpperCase()}`) ?? 0) + 1);
+export function signozServiceStats(evs: Event[], specs: any[]) {
   return {
     status: "success",
-    data: {
-      type: "scalar",
-      data: {
-        results: [
-          {
-            queryName: "A",
-            columns: [
-              { name: "service.name", queryName: "A", columnType: "group" },
-              { name: "severity_text", queryName: "A", columnType: "group" },
-              { name: "n", queryName: "A", aggregationIndex: 0, columnType: "aggregation" },
-            ],
-            data: [...counts.entries()].map(([k, n]) => [...k.split("\u0000"), n]),
-          },
-        ],
-      },
-    },
+    data: { type: "scalar", data: { results: specs.map((spec) => {
+      const counts = new Map<string, number>();
+      for (const e of evs) {
+        if (evaluate(spec.filter.expression, signozFields(e))) counts.set(e.service, (counts.get(e.service) ?? 0) + 1);
+      }
+      return {
+        queryName: spec.name,
+        columns: [{ name: "service.name", columnType: "group" }, { name: "n", columnType: "aggregation" }],
+        data: [...counts.entries()],
+      };
+    }) } },
   };
 }
 
@@ -211,14 +211,8 @@ export interface Recorder {
   responses: unknown[];
 }
 
-function crudeFilter(evs: Event[], f: { levels?: string[]; services?: string[]; text?: string; id?: string }, limit: number): Event[] {
-  return [...evs]
-    .sort((a, b) => (a.time < b.time ? 1 : -1))
-    .filter((e) => !f.levels || f.levels.includes(e.level))
-    .filter((e) => !f.services || f.services.includes(e.service))
-    .filter((e) => !f.text || e.msg.toLowerCase().includes(f.text.toLowerCase()))
-    .filter((e) => !f.id || e.traceId === f.id || JSON.stringify(e.fields).includes(f.id))
-    .slice(0, limit);
+function newest(evs: Event[], limit: number): Event[] {
+  return [...evs].sort((a, b) => (a.time < b.time ? 1 : -1)).slice(0, limit);
 }
 
 export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], responses: [] }) {
@@ -232,13 +226,10 @@ export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], res
       }
       const q = last!.queryString;
       let res: unknown;
-      if (q.includes("stats count(*)")) res = cloudwatchServiceStats(evs);
+      if (q.includes("stats count(*)")) res = cloudwatchServiceStats(evs, q);
       else {
-        const levels = /level in \[([^\]]*)\]/.exec(q)?.[1]?.match(/"([a-z]+)"/g)?.map((s) => s.slice(1, -1));
-        const services = /service in \[([^\]]*)\]/.exec(q)?.[1]?.match(/"([^"]+)"/g)?.map((s) => s.slice(1, -1));
-        const text = /^\| filter @message like \/\(\?i\)(.*)\/$/m.exec(q)?.[1]?.replace(/\\(.)/g, "$1");
-        const id = /@message like "([^"]+)"/.exec(q)?.[1];
-        res = cloudwatchResults(crudeFilter(evs, { levels, services, text, id }, last!.limit));
+        const selected = evs.filter((e) => insightsFields(q, { ...JSON.parse(line(e)), "@message": line(e), "@logStream": `${e.service.replace(/-service$/, "")}/container/task` }));
+        res = cloudwatchResults(newest(selected, last!.limit));
       }
       rec.responses.push(res);
       return res;
@@ -247,20 +238,20 @@ export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], res
   );
 }
 
+function signozFields(e: Event): Record<string, unknown> {
+  return { ...e.fields, "service.name": e.service, body: e.msg, severity_text: e.level.toUpperCase(), trace_id: e.traceId };
+}
+
 export function signozStub(evs: Event[], rec: Recorder = { requests: [], responses: [] }) {
   return Object.assign(
     async (_path: string, body: any) => {
       rec.requests.push(body);
       let res: unknown;
-      if (body.requestType === "scalar") res = signozServiceStats(evs);
+      if (body.requestType === "scalar") res = signozServiceStats(evs, body.compositeQuery.queries.map((q: any) => q.spec));
       else {
         const spec = body.compositeQuery.queries[0].spec;
         const expr: string = spec.filter.expression;
-        const levels = [...expr.matchAll(/severity_text ILIKE '([a-z]+)%'/g)].map((m) => m[1]!);
-        const services = /service\.name IN \(([^)]*)\)/.exec(expr)?.[1]?.match(/'([^']+)'/g)?.map((s) => s.slice(1, -1));
-        const text = /body CONTAINS '((?:[^'\\]|\\.)*)'/.exec(expr)?.[1]?.replace(/\\(.)/g, "$1");
-        const id = /trace_id = '([^']+)'/.exec(expr)?.[1] ?? /requestId = '([^']+)'/.exec(expr)?.[1];
-        res = signozRaw(crudeFilter(evs, { levels: levels.length ? levels : undefined, services, text, id }, spec.limit));
+        res = signozRaw(newest(evs.filter((e) => !expr || evaluate(expr, signozFields(e))), spec.limit));
       }
       rec.responses.push(res);
       return res;

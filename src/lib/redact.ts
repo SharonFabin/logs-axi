@@ -47,6 +47,7 @@ const STRUCTURAL = new Set(["service", "level", "time", "traceId", "spanId", "re
 export function isPatientField(key: string): boolean {
   const k = key.toLowerCase().replace(/[^a-z0-9]/g, "");
   if (DROP_EXACT.has(k)) return true;
+  if (PERSON_PREFIX.test(k) && DROP_EXACT.has(k.replace(PERSON_PREFIX, ""))) return true;
   if (PERSON_NAME.test(k)) return true;
   if (PERSON_PREFIX.test(k) && !KEEP_SUFFIX.test(k)) return true;
   // dotted OTel-style keys: judge the last segment too (`user.email`), but a bare `name` there
@@ -136,10 +137,48 @@ function nameUnlessCommon(m: string): string {
 /** Fold accents so `García` is matched like `Garcia`. */
 const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "");
 
-export function maskText(text: string): string {
-  let out = fold(text);
-  for (const [re, to] of RULES) out = out.replace(re, to as never);
-  return out;
+export function maskText(text: string, stats: RedactStats = { droppedFields: 0 }): string {
+  if (text.trim().startsWith('"')) {
+    try {
+      const decoded: unknown = JSON.parse(text);
+      if (typeof decoded === "string") return JSON.stringify(maskText(decoded, stats));
+    } catch {}
+  }
+  const mask = (s: string) => {
+    let out = fold(s);
+    for (const [re, to] of RULES) out = out.replace(re, to as never);
+    return out;
+  };
+  let out = "";
+  let from = 0;
+  for (let start = 0; start < text.length; start++) {
+    if (text[start] !== "{" && text[start] !== "[") continue;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let end = start; end < text.length; end++) {
+      const c = text[end];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (c === "\\") escaped = true;
+        else if (c === '"') quoted = false;
+      } else if (c === '"') quoted = true;
+      else if (c === "{" || c === "[") depth++;
+      else if (c === "}" || c === "]") depth--;
+      if (depth !== 0 || quoted) continue;
+      let value: unknown;
+      try {
+        value = JSON.parse(text.slice(start, end + 1));
+      } catch {
+        break;
+      }
+      out += mask(text.slice(from, start)) + JSON.stringify(redactValue(value, stats));
+      from = end + 1;
+      start = end;
+      break;
+    }
+  }
+  return out + mask(text.slice(from));
 }
 
 export interface RedactStats {
@@ -147,7 +186,7 @@ export interface RedactStats {
 }
 
 function redactValue(v: unknown, stats: RedactStats): unknown {
-  if (typeof v === "string") return maskText(v);
+  if (typeof v === "string") return maskText(v, stats);
   if (Array.isArray(v)) return v.map((x) => redactValue(x, stats));
   if (v && typeof v === "object") return redactObject(v as Record<string, unknown>, stats);
   return v;
@@ -161,11 +200,15 @@ export function redactObject(obj: Record<string, unknown>, stats: RedactStats): 
       continue;
     }
     // a map keyed by people (`{ byResident: { "Jane Doe": 3 } }`) puts the name in the key
-    out[STRUCTURAL.has(k) ? k : maskText(k)] = STRUCTURAL.has(k) ? v : redactValue(v, stats);
+    const base = STRUCTURAL.has(k) ? k : maskText(k, stats);
+    let key = base;
+    let suffix = 2;
+    while (Object.hasOwn(out, key)) key = `${base}#${suffix++}`;
+    Object.defineProperty(out, key, { value: STRUCTURAL.has(k) && typeof v === "string" && !/^[\s]*[\[{"]/.test(v) ? v : redactValue(v, stats), enumerable: true, configurable: true, writable: true });
   }
   return out;
 }
 
 export function redactRecord(r: LogRecord, stats: RedactStats): LogRecord {
-  return { ...r, msg: maskText(r.msg), fields: redactObject(r.fields, stats) };
+  return { ...r, msg: maskText(r.msg, stats), fields: redactObject(r.fields, stats) };
 }

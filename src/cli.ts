@@ -48,7 +48,7 @@ const SPECS: Record<Command, Spec> = {
   search: {
     usage: "search [text]",
     summary: "lines matching text (case-insensitive), level, service and time range",
-    flags: { ...RANGE, ...SERVICE, ...LEVEL, ...LIMIT, ...FULL, text: { type: "string", description: "substring of the message" } },
+    flags: { ...RANGE, ...SERVICE, ...LEVEL, ...LIMIT, ...FULL },
     since: "15m",
     limit: 50,
   },
@@ -161,7 +161,7 @@ function dispatch(cmd: Command, ctx: Ctx, args: ParsedArgs, spec: Spec): Promise
       return tail(ctx, { service, level, limit });
     case "search": {
       extra(1);
-      const text = typeof f.text === "string" ? f.text : args.positionals[0];
+      const text = args.positionals[0];
       if (!text && !level && !service) {
         throw usageError("search needs text, --level or --service", [`${ctx.prefix} search "timeout" --service case`]);
       }

@@ -13,7 +13,7 @@ import {
 } from "@aws-sdk/client-cloudwatch-logs";
 import { AxiError } from "../lib/errors.js";
 import { maskText } from "../lib/redact.js";
-import { isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
+import { INFERRED_LEVELS, LEVEL_ALIASES, isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
 import type { LogQuery, LogRecord, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface CloudWatchEnv {
@@ -72,26 +72,32 @@ export function buildQuery(q: LogQuery): string {
     const names = serviceAliases(q.service);
     filters.push(`(service in ${list(names)} or @logStream like /^(${names.map(reEscape).join("|")})\\//)`);
   }
-  if (q.minLevel && q.minLevel !== "debug") {
-    const levels = levelsAtLeast(q.minLevel);
-    const spelled = levels.flatMap((l) => [l, l.toUpperCase(), ...(l === "warn" ? ["warning", "WARNING"] : [])]);
-    // a line with no level field (a crash, a stack trace) counts by its words
-    const words = q.minLevel === "info" ? null : levels.includes("warn") ? "warn|error|exception|fatal|panic" : "error|exception|fatal|panic";
-    filters.push(words ? `(level in ${list(spelled)} or (not ispresent(level) and @message like /(?i)(${words})/))` : `(level in ${list(spelled)} or not ispresent(level))`);
-  }
+  if (q.minLevel && q.minLevel !== "debug") filters.push(`axiLevel in ${list(levelsAtLeast(q.minLevel))}`);
   if (q.text) filters.push(`@message like /(?i)${reEscape(q.text)}/`);
   if (q.id) filters.push(`@message like ${JSON.stringify(q.id)}`);
   return [
     "fields @timestamp, @message, @logStream",
+    ...LEVEL_QUERY,
     ...filters.map((f) => `| filter ${f}`),
     "| sort @timestamp desc",
     `| limit ${q.limit}`,
   ].join("\n");
 }
 
+const LEVEL_QUERY = [
+  `| fields case(isempty(level) = 0, level, isempty(severity) = 0, severity, severity_text) as axiRawLevel`,
+  `| fields case(isempty(msg) = 0, msg, isempty(message) = 0, message, @message) as axiMessage`,
+  "| fields case(" + [
+    ...Object.entries(LEVEL_ALIASES).flatMap(([alias, level]) => [`tolower(axiRawLevel) = ${JSON.stringify(alias)}`, JSON.stringify(level)]),
+    ...INFERRED_LEVELS.flatMap(([level, pattern]) => [`isempty(axiRawLevel) = 1 and axiMessage like /(?i)${pattern}/`, JSON.stringify(level)]),
+    `case(isempty(axiRawLevel) = 1, "-", tolower(axiRawLevel))`,
+  ].join(", ") + ") as axiLevel",
+];
+
 export const SERVICES_QUERY = [
   "parse @logStream /^(?<stream>[^\\/]+)/",
-  "| fields coalesce(service, stream, \"-\") as svc, coalesce(level, \"-\") as lvl",
+  ...LEVEL_QUERY,
+  "| fields coalesce(service, stream, \"-\") as svc, axiLevel as lvl",
   "| stats count(*) as n by svc, lvl",
   "| limit 1000",
 ].join("\n");

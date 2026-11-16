@@ -22,7 +22,7 @@ groups[3]{count,service,first,last,template,sample}:
   9,case-service,"14:00:12","14:14:10","payer lookup failed: upstream <n> after <n>ms",d50bd85bb2d7b2cd5cad44c6d624a749
 help[2]:
   Run `logs-axi signoz dev trace 8b441761f73c78f742d40a3a454503f4` to see one occurrence in context
-  Run `logs-axi signoz dev search --service ehr-service --level error --text "<words from a template>"` for the raw lines
+  Run `logs-axi signoz dev search --service ehr-service --level error "<words from a template>"` for the raw lines
 ```
 
 ## Install and configure

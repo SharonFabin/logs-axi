@@ -56,7 +56,7 @@ followed by `help[N]:` lines with the next commands to run.
 
 ```
 tail                 latest lines, oldest first            default --since 15m --limit 50
-search [text]        text (case-insensitive) / --level / --service   15m, 50
+search [text]        positional text (case-insensitive) / --level / --service   15m, 50
 errors               error lines grouped by template        15m, --limit = groups (20)
 trace <id>           every line with that trace/request/case/run id   24h, 200
 services             line, error and warning counts per service       1h

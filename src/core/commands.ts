@@ -115,7 +115,7 @@ function filterArgs(f: Partial<LineFlags>): string {
   return [
     f.service ? `--service ${f.service}` : "",
     f.level ? `--level ${f.level}` : "",
-    f.text ? `--text ${JSON.stringify(f.text)}` : "",
+    f.text ? JSON.stringify(f.text) : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -148,7 +148,7 @@ export function trace(ctx: Ctx, id: string, f: LineFlags): Promise<Output> {
     { id, service: f.service, minLevel: f.level, limit: f.limit },
     [
       run(ctx, "trace", id, "--since 7d") + " to look further back",
-      run(ctx, "search --text", JSON.stringify(id)) + " to match it anywhere in the message",
+      run(ctx, "search", JSON.stringify(id)) + " to match it anywhere in the message",
     ],
     [],
     false,
@@ -157,13 +157,10 @@ export function trace(ctx: Ctx, id: string, f: LineFlags): Promise<Output> {
 
 const SAMPLE_KEYS = ["requestId", "correlationId", "caseId", "runId"];
 
-/** The id worth following from one line: a request/case/run id, else any other `*Id` field. */
 function sampleId(fields: Record<string, unknown>): string | undefined {
   const ok = (v: unknown): v is string => typeof v === "string" && v !== "";
   for (const k of SAMPLE_KEYS) if (ok(fields[k])) return fields[k];
-  // tenancy ids (org, facility, user) match thousands of lines, so they are not worth following
-  const other = Object.entries(fields).find(([k, v]) => /Id$/.test(k) && !/^(org|organization|facility|principal|user|tenant)Id$/.test(k) && ok(v));
-  return other?.[1] as string | undefined;
+  return undefined;
 }
 const ERROR_DETAIL_KEYS = ["error", "err", "errorMessage", "exception.message", "errorName", "reason", "detail"];
 
@@ -231,7 +228,7 @@ export async function errors(ctx: Ctx, f: Omit<LineFlags, "text">): Promise<Outp
   if (sorted.length > shown.length) help.push(`${sorted.length - shown.length} smaller groups hidden; add --limit ${sorted.length} to see all`);
   const top = shown[0]!;
   if (top.sample !== "-") help.push(run(ctx, "trace", top.sample) + " to see one occurrence in context");
-  help.push(run(ctx, "search --service", top.service, "--level", level, '--text "<words from a template>"') + " for the raw lines");
+  help.push(run(ctx, "search --service", top.service, "--level", level, '"<words from a template>"') + " for the raw lines");
   return finish(ctx, body, help);
 }
 
@@ -285,6 +282,6 @@ export async function fields(ctx: Ctx, f: Omit<LineFlags, "text" | "limit">): Pr
   return finish(
     ctx,
     { range: ctx.rangeLabel, sampled: rows.length, columns: "time,level,service,msg,traceId (always shown)", fields: list },
-    [run(ctx, "search --text <value>") + " to find lines by value", run(ctx, "trace <id>") + " to follow an id across services"],
+    [run(ctx, "search <value>") + " to find lines by value", run(ctx, "trace <id>") + " to follow an id across services"],
   );
 }

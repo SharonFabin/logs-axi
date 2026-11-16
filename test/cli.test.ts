@@ -41,7 +41,7 @@ describe.each(["cloudwatch", "signoz"] as const)("%s", (source) => {
   });
 
   it("trace returns only that trace's lines", async () => {
-    const id = evs[10]!.traceId!;
+    const id = source === "cloudwatch" ? String(evs[10]!.fields.requestId ?? evs[10]!.fields.caseId) : evs[10]!.traceId!;
     const { out } = await run([source, "dev", "trace", id], deps(source));
     expect(body(out).lines).toHaveLength(1);
   });

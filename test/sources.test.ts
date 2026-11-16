@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildQuery, cloudwatch, parseRow as cwRow } from "../src/sources/cloudwatch.js";
 import { buildFilter, parseRow as szRow, signoz } from "../src/sources/signoz.js";
 import { template } from "../src/lib/template.js";
+import { evaluate, insightsFields } from "./query-contract.js";
 import { events, signozRaw } from "./fixtures.js";
 
 const range = { start: 1_000_000, end: 2_000_000 };
@@ -10,8 +11,8 @@ describe("cloudwatch", () => {
   it("builds an Insights query from the shared filters", () => {
     const q = buildQuery({ ...range, service: "case", minLevel: "error", text: "pay.er", id: "abc-123", limit: 50 });
     expect(q).toContain('filter (service in ["case", "case-service"] or @logStream like /^(case|case-service)\\//)');
-    expect(q).toContain('level in ["error", "ERROR", "fatal", "FATAL"]');
-    expect(q).toContain("not ispresent(level) and @message like /(?i)(error|exception|fatal|panic)/");
+    expect(insightsFields(q, { service: "case", level: "critical", "@message": "pay.er abc-123" })).toBeDefined();
+    expect(insightsFields(q, { service: "case", level: "info", "@message": "pay.er abc-123" })).toBeUndefined();
     expect(q).toContain("@message like /(?i)pay\\.er/");
     expect(q).toContain('@message like "abc-123"');
     expect(q).toMatch(/sort @timestamp desc\n\| limit 50$/);
@@ -66,9 +67,9 @@ describe("cloudwatch", () => {
 
 describe("signoz", () => {
   it("builds a v5 filter expression from the shared filters", () => {
-    expect(buildFilter({ ...range, service: "case-service", minLevel: "warn", text: "50%_o'k", limit: 1 })).toBe(
-      "service.name IN ('case-service', 'case') AND (severity_text ILIKE 'warn%' OR severity_text ILIKE 'error%' OR severity_text ILIKE 'fatal%') AND body CONTAINS '50\\\\%\\\\_o\\'k'",
-    );
+    const filter = buildFilter({ ...range, service: "case-service", minLevel: "warn", limit: 1 });
+    expect(evaluate(filter, { "service.name": "case", severity_text: "WARNING" })).toBe(true);
+    expect(evaluate(filter, { "service.name": "case", severity_text: "NOTICE" })).toBe(false);
     expect(buildFilter({ ...range, id: "4BF92F3577B34DA6A3CE929D0E0E4736", limit: 1 })).toBe("trace_id = '4bf92f3577b34da6a3ce929d0e0e4736'");
     expect(buildFilter({ ...range, id: "req-1", limit: 1 })).toBe("(requestId = 'req-1' OR correlationId = 'req-1' OR caseId = 'req-1' OR runId = 'req-1')");
   });

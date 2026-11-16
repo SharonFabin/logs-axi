@@ -7,8 +7,8 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { maskText } from "../lib/redact.js";
-import { isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
-import type { LogQuery, LogRecord, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
+import { INFERRED_LEVELS, LEVEL_ALIASES, isoTime, levelsAtLeast, normalizeLevel, parseLine, SAFE_TOKEN, serviceAliases } from "../core/normalize.js";
+import { LEVELS, type Level, type LogQuery, type LogRecord, type ServiceCount, type Source, type SourceFactory, type TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
   endpoint: string;
@@ -57,7 +57,7 @@ function httpTransport(env: SignozEnv, label: string): SignozTransport {
     }
     const text = await res.text();
     if (!res.ok) {
-      throw new AxiError(`signoz: HTTP ${res.status}: ${maskText(text.slice(0, 300))}`, {
+      throw new AxiError(`signoz: HTTP ${res.status}: ${maskText(text).slice(0, 300)}`, {
         help: res.status === 401 || res.status === 403 ? [`check the key in ${keyVar}`] : [],
       });
     }
@@ -72,12 +72,38 @@ const lit = (s: string, like = false) =>
 /** Ids the house logger binds as attributes; a non-trace id is looked up in these. */
 const ID_ATTRIBUTES = ["requestId", "correlationId", "caseId", "runId"];
 
+const LEVEL_FIELDS = ["body.level", "body.severity", "body.severity_text", "level", "severity", "severity_text"];
+const missing = (field: string) => `(${field} NOT EXISTS OR ${field} = '')`;
+const all = (parts: string[]) => "(" + parts.join(" AND ") + ")";
+const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
+
+function levelFilter(level: Level): string {
+  const aliases = Object.entries(LEVEL_ALIASES).filter(([, value]) => value === level).map(([alias]) => alias);
+  const explicit = LEVEL_FIELDS.map((field, i) => all([
+    ...LEVEL_FIELDS.slice(0, i).map(missing),
+    `${field} REGEXP ${lit("(?i)^(" + aliases.join("|") + ")$")}`,
+  ]));
+  const inferred = INFERRED_LEVELS.findIndex(([value]) => value === level);
+  if (inferred >= 0) {
+    const messages = ["body.msg", "body.message", "body"];
+    explicit.push(all([
+      ...LEVEL_FIELDS.map(missing),
+      any(messages.map((field, i) => all([
+        ...messages.slice(0, i).map(missing),
+        ...INFERRED_LEVELS.slice(0, inferred).map(([, pattern]) => `${field} NOT REGEXP ${lit("(?i)" + pattern)}`),
+        `${field} REGEXP ${lit("(?i)" + INFERRED_LEVELS[inferred]![1])}`,
+      ]))),
+    ]));
+  }
+  return any(explicit);
+}
+
 /** The v5 filter expression for a LogQuery. Exported for tests. */
 export function buildFilter(q: LogQuery): string {
   const parts: string[] = [];
   if (q.service) parts.push(`service.name IN (${serviceAliases(q.service).map((s) => lit(s)).join(", ")})`);
   if (q.minLevel && q.minLevel !== "debug") {
-    parts.push("(" + levelsAtLeast(q.minLevel).map((l) => `severity_text ILIKE ${lit(l + "%")}`).join(" OR ") + ")");
+    parts.push(any(levelsAtLeast(q.minLevel).map(levelFilter)));
   }
   if (q.text) parts.push(`body CONTAINS ${lit(q.text, true)}`);
   if (q.id) {
@@ -124,26 +150,23 @@ export function servicesRequest(range: TimeRange): unknown {
     end: range.end,
     requestType: "scalar",
     compositeQuery: {
-      queries: [
-        {
-          type: "builder_query",
-          spec: {
-            name: "A",
-            signal: "logs",
-            aggregations: [{ expression: "count()", alias: "n" }],
-            groupBy: [
-              { name: "service.name", fieldContext: "resource" },
-              { name: "severity_text", fieldContext: "log" },
-            ],
-            limit: 1000,
-          },
+      queries: [...LEVELS, "unknown"].map((level) => ({
+        type: "builder_query",
+        spec: {
+          name: level,
+          signal: "logs",
+          filter: { expression: level === "unknown" ? `NOT ${any(LEVELS.map(levelFilter))}` : levelFilter(level as Level) },
+          aggregations: [{ expression: "count()", alias: "n" }],
+          groupBy: [{ name: "service.name", fieldContext: "resource" }],
+          limit: 1000,
         },
-      ],
+      })),
     },
   };
 }
 
 interface V5Result {
+  queryName?: string;
   rows?: { timestamp?: unknown; data?: Record<string, unknown> }[] | null;
   columns?: { name: string; columnType?: string }[];
   data?: unknown[][] | null;
@@ -152,7 +175,7 @@ interface V5Result {
 function results(payload: unknown): V5Result[] {
   const p = payload as { status?: string; error?: unknown; data?: { data?: { results?: V5Result[] | null } } };
   // never echo the payload itself: a failed response can still carry rows
-  if (p?.status && p.status !== "success") throw new AxiError(`signoz: ${maskText(JSON.stringify(p.error ?? p.status).slice(0, 300))}`);
+  if (p?.status && p.status !== "success") throw new AxiError(`signoz: ${maskText(JSON.stringify(p.error ?? p.status)).slice(0, 300)}`);
   return p?.data?.data?.results ?? [];
 }
 
@@ -172,11 +195,14 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
   const rec = parseLine(body, {
     time: isoTime(row.timestamp ?? d.timestamp) ?? "",
     service: String(resources["service.name"] ?? attrs.service ?? "-"),
-    level: typeof d.severity_text === "string" ? d.severity_text : undefined,
+    level: [attrs.level, attrs.severity, attrs.severity_text, d.severity_text].find((v): v is string => typeof v === "string" && v !== ""),
     ...(traceId ? { traceId } : {}),
   });
   // a JSON body already carried its own fields; attributes add the rest
   delete attrs.service;
+  delete attrs.level;
+  delete attrs.severity;
+  delete attrs.severity_text;
   return { ...rec, fields: { ...attrs, ...rec.fields } };
 }
 
@@ -195,12 +221,11 @@ class SignozSource implements Source {
       const cols = r.columns ?? [];
       const at = (name: string) => cols.findIndex((c) => c.name === name);
       const svc = at("service.name");
-      const lvl = at("severity_text");
       const n = cols.findIndex((c) => c.columnType === "aggregation");
       for (const row of r.data ?? []) {
         out.push({
           service: String(row[svc] ?? "-"),
-          level: normalizeLevel(row[lvl]),
+          level: r.queryName === "unknown" ? "-" : normalizeLevel(r.queryName),
           count: Number(row[n] ?? 0),
         });
       }
