@@ -1,5 +1,5 @@
 /**
- * A message's template: the variable parts (ids, numbers, times, hosts, quoted values)
+ * A message's template: the variable parts (ids, numbers, times, URLs, IP addresses)
  * replaced by placeholders, so one failure repeated 400 times with 400 case ids is
  * one group. Runs after redaction, so `[name]` and friends are already placeholders.
  */

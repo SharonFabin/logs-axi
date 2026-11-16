@@ -67,7 +67,7 @@ const STRUCTURAL = new Set(["time", "timestamp", "@timestamp", "level", "severit
 
 /**
  * One line of the house JSON log shape `{time, level, service, msg, ...fields}`; a line
- * that is not JSON becomes the message as-is. `fallbackService` is used when the line
+ * that is not JSON becomes the message as-is. `fallback.service` is used when the line
  * names none (CloudWatch's stream prefix, SigNoz's resource).
  */
 export function parseLine(raw: string, fallback: { time: string; service: string; level?: string; traceId?: string }): LogRecord {

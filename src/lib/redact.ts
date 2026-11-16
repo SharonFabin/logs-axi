@@ -32,7 +32,7 @@ const NAME_SUFFIXES = [...KEY_KINDS].filter(([key]) => key !== "name" && key.end
 const PERSON_PREFIX = new RegExp("^(?:" + PERSON_PREFIXES.map(normalizeKey).join("|") + ")");
 const KEEP_SUFFIX = /(id|ids|count|counts|total)$/;
 
-/** Fields that are structure, not content: never masked. */
+/** Structural field keys stay verbatim; their values still undergo redaction. */
 const STRUCTURAL = new Set(["service", "level", "time", "traceId", "spanId", "requestId", "correlationId"]);
 const OPERATIONAL_IDS = new Set(["requestid", "correlationid", "caseid", "runid", "traceid", "residentid", "patientid", "orgid", "facilityid"]);
 const isOperationalId = (key: string) => OPERATIONAL_IDS.has(singularKey(normalizeKey(key)));

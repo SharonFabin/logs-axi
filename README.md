@@ -47,6 +47,9 @@ per environment). No secrets live in it:
 | `cloudwatch` | `region`, `logGroups[]`, `profile` | the AWS profile (`aws sso login --profile ...`) |
 | `signoz` | `endpoint` | a viewer API key; see [SigNoz login](#signoz-login) |
 
+Find your deployment's actual profiles, log groups, endpoints and viewer-key
+parameter names in your organization's private infrastructure code.
+
 If your SigNoz has no public endpoint, forward it to localhost first (for example with
 an SSM or `kubectl` port-forward); the example uses 3301 for dev and 3302 for prod.
 
@@ -125,9 +128,11 @@ On by default (`src/lib/redact.ts`):
   emails, phones, dashed SSNs, labelled nine-digit SSNs or social-security numbers,
   DOBs, MRNs, member/Rx numbers, rooms, titled names (`Dr [name]`),
   labelled names (`resident: [name]`), `Last, First`, and runs of capitalized words that
-  are not common log vocabulary. Structural string fields such as service names and trace/request IDs
-  are preserved. JSON objects and arrays embedded in messages and non-structural
-  string values are recursively redacted.
+  are not common log vocabulary. Operational ID scalar values are preserved;
+  objects and arrays under those keys are still recursively redacted. JSON objects
+  and arrays embedded in messages and string values are recursively redacted.
+  Incomplete JSON fragments are masked conservatively, including descendants of
+  protected containers.
 - With redaction enabled, `errors` shows templates computed after masking, never raw payloads.
 
 `--unredacted` turns this off and puts a warning first in the output. It is never the

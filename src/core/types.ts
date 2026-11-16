@@ -31,7 +31,7 @@ export interface LogQuery extends TimeRange {
   minLevel?: Level;
   /** Service name; adapters also match the `<name>-service` spelling. */
   service?: string;
-  /** A trace, request, case or run id: every line carrying it. */
+  /** A trace, request, correlation, case or run id; matching rules: README.md#commands. */
   id?: string;
   /** Newest first, at most this many. */
   limit: number;
