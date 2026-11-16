@@ -40,7 +40,7 @@ describe("free-text masking", () => {
     ["Dr McDonald signed", "Dr [name] signed"],
     ["resident: DeShawn MacArthur", "resident: [name]"],
     ["mail jane.t@example.com DOB: 01/05/1950", "mail [email] [dob]"],
-    ["MRN: A12345 Rx #1234567 member id ABC12345 room 12B ssn 123-45-6789", "[mrn] [rx] [id] [room] ssn [ssn]"],
+    ["MRN: A12345 Rx #1234567 member id ABC12345 room 12B ssn 123-45-6789", "[mrn] [rx] [id] [room] [ssn]"],
   ])("%s", (input, expected) => expect(maskText(input)).toBe(expected));
 
   it.each([
@@ -50,6 +50,7 @@ describe("free-text masking", () => {
     "GET /api/cases/3f2a1c9e-1111-4222-8333-444455556666 returned 502 Bad Gateway",
     "Patient Not Found",
     "case created",
+    "request 123456789 caseId=987654321",
     "ECONNREFUSED 10.0.0.12:5432",
   ])("leaves ordinary log text alone: %s", (input) => expect(maskText(input)).toBe(input));
 

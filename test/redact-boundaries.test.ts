@@ -7,6 +7,9 @@ import { signoz } from "../src/sources/signoz.js";
 import { NOW, TEST_CONFIG, cloudwatchStub, events, signozStub } from "./fixtures.js";
 
 const labels = [
+  ...["ssn:", "SSN", "social security number", "social-security-number:"].flatMap((label) => [
+    [label, "123456789", "[ssn]"], [label, "123-45-6789", "[ssn]"],
+  ]),
   ["MRN:", "A12345", "[mrn]"], ["MR#", "A12345", "[mrn]"], ["medical record number:", "A12345", "[mrn]"],
   ["Rx #", "123456", "[rx]"], ["Rx number:", "123456", "[rx]"],
   ...["member", "subscriber", "policy", "medicaid", "medicare", "mbi", "beneficiary", "insurance"].map((label) => [`${label} id:`, "MBR12345", "[id]"]),
@@ -40,10 +43,11 @@ it("runs exact, person-name and prefix rules on normalized singular fields, pres
 });
 
 it.each(["cloudwatch", "signoz"] as const)("%s sanitizes plural names and quoted identifiers before every output consumer", async (source) => {
-  const event = { ...events(1)[0]!, level: "error", msg: "failed MRN: 'A12345'", fields: {
+  const event = { ...events(1)[0]!, level: "error", msg: "failed MRN: 'A12345'; invalid ssn: 123456789", fields: {
     caseId: "case-1", medicationNames: ["apixaban"], providerNames: ["PROTECTEDVALUE"], "ctx:userNames": ["PROTECTEDVALUE"],
-    details: JSON.stringify({ personNames: ["PROTECTEDVALUE"], message: 'member id: "MBR12345"' }),
-    error: "Rx # '123456'", note: 'bed # "12B"',
+    details: JSON.stringify({ personNames: ["PROTECTEDVALUE"], message: 'member id: "MBR12345"; social security number "123456789"' }),
+    error: "Rx # '123456'; SSN 123456789", note: 'bed # "12B"; ssn: 123456789',
+    counts: { "ssn: 123456789": 1 }, requestId: "987654321",
   } };
   const deps = { config: TEST_CONFIG, now: NOW, transports: { [source]: source === "cloudwatch" ? cloudwatchStub([event]) : signozStub([event]) } };
   for (const command of [["tail", "--full"], ["search", "failed", "--full"], ["trace", "case-1", "--full"], ["errors"], ["fields"]]) {
@@ -51,6 +55,7 @@ it.each(["cloudwatch", "signoz"] as const)("%s sanitizes plural names and quoted
     expect(result.code).toBe(0);
     expect(result.out).not.toMatch(/A12345|MBR12345|123456|12B|PROTECTEDVALUE|apixaban/);
     const output = JSON.parse(result.out);
+    if (output.lines !== undefined || output.fields !== undefined) expect(result.out).toContain("987654321");
     if (output.lines !== undefined) expect(output.lines).toHaveLength(1);
     if (output.groups !== undefined) expect(output.groups).toHaveLength(1);
     if (output.fields !== undefined) expect(output.fields.some((field: any) => field.field === "caseId")).toBe(true);
@@ -58,26 +63,32 @@ it.each(["cloudwatch", "signoz"] as const)("%s sanitizes plural names and quoted
 });
 
 it("masks quoted identifiers in AWS SDK diagnostics", async () => {
-  const send = vi.spyOn(CloudWatchLogsClient.prototype, "send").mockRejectedValue(new Error("MRN: 'A12345'"));
+  const send = vi.spyOn(CloudWatchLogsClient.prototype, "send").mockRejectedValue(new Error("MRN: 'A12345'; ssn: 123456789"));
   try {
     const source = cloudwatch({ region: "us-east-1", logGroups: ["g"] }, "t");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[mrn]");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("A12345");
+    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
+    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
   } finally {
     send.mockRestore();
   }
 });
 
 it("masks quoted identifiers in SigNoz HTTP and structured error diagnostics", async () => {
-  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('member id: "MBR12345"', { status: 500 }));
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('member id: "MBR12345"; social security number "123456789"', { status: 500 }));
   vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test");
   try {
     const source = signoz({ endpoint: "http://x" }, "t");
     await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[id]");
+    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
+    await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
   } finally {
     vi.unstubAllEnvs();
     fetch.mockRestore();
   }
-  const source = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: "Rx # '123456'" } }));
+  const source = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: "Rx # '123456'; ssn: 123456789" } }));
   await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[rx]");
+  await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.toThrow("[ssn]");
+  await expect(source.query({ start: NOW - 1000, end: NOW, limit: 1 })).rejects.not.toThrow("123456789");
 });

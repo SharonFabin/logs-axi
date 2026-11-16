@@ -96,6 +96,7 @@ const labelledValue = (label: string, value: string) => new RegExp(String.raw`\b
 
 const RULES: [RegExp, string | ((m: string, ...g: string[]) => string)][] = [
   [/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "[email]"],
+  [labelledValue(String.raw`SSN(?![A-Za-z])|social[ -]security[ -]number(?![A-Za-z])`, String.raw`(?:\d{9}|\d{3}-\d{2}-\d{4})\b`), "[ssn]"],
   [/\b\d{3}-\d{2}-\d{4}\b/g, "[ssn]"],
   [/\+\d{10,15}(?!\d)/g, "[phone]"],
   [/(?<![\w.])(?:1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?![\w.])/g, "[phone]"],
