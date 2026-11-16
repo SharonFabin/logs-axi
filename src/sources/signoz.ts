@@ -7,7 +7,7 @@
  * SIGNOZ-API-KEY header and never printed.
  */
 import { AxiError } from "../lib/errors.js";
-import { KEY_ENV, signozKey, validKey } from "../lib/credentials.js";
+import { signozKey, validKey } from "../lib/credentials.js";
 import { maskText } from "../lib/redact.js";
 import { ID_FIELDS, INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
@@ -33,6 +33,18 @@ function validate(raw: Record<string, unknown>, label: string): SignozEnv {
   return raw as unknown as SignozEnv;
 }
 
+function diagnostic(value: unknown, key: string): string {
+  if (typeof value === "string") { try { value = JSON.parse(value); } catch {} }
+  const scrub = (item: unknown): unknown => {
+    if (typeof item === "string") return item.replaceAll(key, "[api-key]");
+    if (Array.isArray(item)) return item.map(scrub);
+    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([name, entry]) => [name.replaceAll(key, "[api-key]"), scrub(entry)]));
+    return item;
+  };
+  const cleaned = scrub(value);
+  return maskText(typeof cleaned === "string" ? cleaned : JSON.stringify(cleaned) ?? "").replaceAll(key, "[api-key]").slice(0, 300);
+}
+
 function httpTransport(env: SignozEnv, label: string, envName: string): SignozTransport {
   return async (path, body) => {
     const key = signozKey(envName);
@@ -54,9 +66,8 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
       });
     }
     if (!res.ok) {
-      throw new AxiError(`signoz: HTTP ${res.status}: ${maskText(text.replaceAll(key, "[api-key]")).slice(0, 300)}`, {
-        help: res.status === 401 || res.status === 403 ? [`the key was rejected: run \`logs-axi signoz login\` (or check ${KEY_ENV})`] : [],
-      });
+      if (res.status === 401 || res.status === 403) throw new AxiError(`signoz: HTTP ${res.status}: check your viewer key with \`logs-axi signoz login\``);
+      throw new AxiError(`signoz: HTTP ${res.status}: ${diagnostic(text, key)}`);
     }
     let payload;
     try {
@@ -65,8 +76,7 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
       throw new AxiError("signoz: response is not valid JSON");
     }
     if (payload?.status && payload.status !== "success") {
-      const diagnostic = JSON.stringify(payload.error ?? payload.status).replaceAll(key, "[api-key]");
-      throw new AxiError(`signoz: ${maskText(diagnostic).slice(0, 300)}`);
+      throw new AxiError(`signoz: ${diagnostic(payload.error ?? payload.status, key)}`);
     }
     return payload;
   };
@@ -166,7 +176,7 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
   return { ...rec, fields: { ...attrs, ...rec.fields } };
 }
 
-function rowTraceIds(data: Record<string, unknown>): string[] {
+function rowIds(data: Record<string, unknown>): string[] {
   let body: unknown = data.body;
   if (typeof body === "string") { try { body = JSON.parse(body); } catch {} }
   const native = str(data.trace_id);
@@ -174,7 +184,7 @@ function rowTraceIds(data: Record<string, unknown>): string[] {
   return [native && !/^0+$/.test(native) ? native : undefined, ...fields.flatMap((value) => {
     if (!value || typeof value !== "object") return [];
     const record = value as Record<string, unknown>;
-    return [str(record.traceId), str(record.trace_id)];
+    return ID_FIELDS.map((field) => str(record[field]));
   })].filter((value): value is string => value !== undefined);
 }
 
@@ -199,7 +209,7 @@ class SignozSource implements Source {
           seen.add(id);
         }
         const record = parseRow(row);
-        if (matchesRecord(record, q) || q.id && rowTraceIds(row.data ?? {}).some((traceId) => matchesRecord({ ...record, traceId }, q))) rows.push(record);
+        if (matchesRecord(record, q) || q.id && rowIds(row.data ?? {}).some((id) => matchesRecord({ ...record, traceId: id }, q))) rows.push(record);
         if (rows.length === q.limit) return { rows, partial: false };
       }
       if (page.length < limit) return { rows, partial: false };

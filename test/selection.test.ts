@@ -105,11 +105,11 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
     if (provider === "signoz") expect(test.requests.some((r) => r.compositeQuery.queries[0].spec.offset >= 100)).toBe(true);
     else expect(test.requests[0].limit).toBeGreaterThan(2);
   });
-  it("uses rendered service and supported IDs rather than lower-priority field matches", async () => {
+  it("uses rendered service while matching every supported original ID", async () => {
     const input = row({ level: "error", service: "chosen", requestId: "chosen-id", msg: "failed" }, 0, { attributes_string: { service: "ignored", requestId: "ignored-id" }, resources_string: { "service.name": "ignored" } });
     const test = create([input]);
     expect((await test.source.query({ ...range, service: provider === "cloudwatch" ? "case" : "ignored", limit: 1 })).rows).toEqual([]);
-    expect((await test.source.query({ ...range, id: "ignored-id", limit: 1 })).rows).toEqual([]);
+    expect((await test.source.query({ ...range, id: "ignored-id", limit: 1 })).rows).toHaveLength(provider === "signoz" ? 1 : 0);
     expect((await test.source.query({ ...range, id: "chosen-id", service: "chosen", limit: 1 })).rows).toHaveLength(1);
   });
   it("reports an unfinished scan instead of claiming an empty complete result", async () => {
@@ -258,6 +258,21 @@ it("SigNoz matches every original trace representation while retaining level and
       expect(result.rows[0]).toMatchObject({ traceId: "body-trace", level: "error", service: "case" });
     }
     expect((await source.query({ ...range, id: "unrelated", limit: 10 })).rows).toEqual([]);
+  }
+});
+
+it.each(["requestId", "correlationId", "caseId", "runId"])("SigNoz matches shadowed body and attribute %s values", async (field) => {
+  for (const [inner, outer] of [["inner", "outer"], ["4bf92f3577b34da6a3ce929d0e0e4736", "4BF92F3577B34DA6A3CE929D0E0E4737"]]) {
+    const body = { [field]: inner, level: "error", service: "chosen", msg: "failed" };
+    const data = { attributes_string: { [field]: outer }, resources_string: { "service.name": "chosen" } };
+    const wire = signozWire([row(body, 0, data), row({ ...body, level: "warn", severity: "error" }, 1, data), row({ ...body, service: "other" }, 2, data)]);
+    const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
+    for (const id of [inner, outer, outer.toLowerCase()]) {
+      const result = await source.query({ ...range, id, minLevel: "error", service: "chosen", limit: 10 });
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0]?.fields[field]).toBe(inner);
+    }
+    expect((await source.query({ ...range, id: "unrelated", limit: 1 })).rows).toEqual([]);
   }
 });
 

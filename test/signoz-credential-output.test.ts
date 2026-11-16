@@ -4,7 +4,8 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
+import { run } from "../src/cli.js";
 
 // The owner's contract forbids printing keys, including credentials echoed by an
 // upstream error. Exercise the actual CLI and HTTP transport, not a fetch stub.
@@ -46,11 +47,35 @@ it("keeps the active key out of HTTP and structured SigNoz error output", async 
       expect(code).toBe(1);
       expect(output).not.toContain(key);
       expect(output).not.toContain("123456789");
-      expect(output).toContain("[api-key]");
-      expect(output).toContain("[ssn]");
+      if (structured) expect(output).toMatch(/\[(?:api-key|redacted|ssn)\]/);
+      else expect(output).toContain("logs-axi signoz login");
     }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }, 30_000);
+
+it.each(["sekret123", String.raw`hidden"sekret\987`])("removes decoded and escaped credentials from every SigNoz error format", async (key) => {
+  vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", key);
+  const escaped = [...key].map((char) => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0")).join("");
+  try {
+    for (const status of [401, 403, 500, 200]) for (const format of [[], ["--json"]]) {
+      const details = { message: `provider-only-marker rejected ${key}; ssn: 123456789`, requestId: key, nested: [{ [key]: key }] };
+      const body = JSON.stringify(status === 200 ? { status: "error", error: details } : details).replaceAll(JSON.stringify(key).slice(1, -1), escaped);
+      const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(body, { status }));
+      try {
+        const result = await run(["signoz", "dev", "tail", ...format], { config: { sources: { signoz: { dev: { endpoint: "http://signoz.test" } } } } });
+        expect(result.code).toBe(1);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ "SIGNOZ-API-KEY": key });
+        for (const secret of [key, JSON.stringify(key).slice(1, -1), escaped, "hidden", "sekret123", "987"]) expect(result.out).not.toContain(secret);
+        expect(result.out).not.toContain("123456789");
+        if (status === 401 || status === 403) {
+          expect(result.out).toContain("logs-axi signoz login");
+          expect(result.out).not.toContain("provider-only-marker");
+        }
+      } finally { fetch.mockRestore(); }
+    }
+  } finally { vi.unstubAllEnvs(); }
+});
