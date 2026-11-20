@@ -103,10 +103,11 @@ describe("credential diagnostics", () => {
 type WireRow = { timestamp: string; data: Record<string, any> };
 const wireFields = (row: WireRow) => ({ attribute: row.data.attributes_string ?? {}, resource: row.data.resources_string ?? {}, log: { body: row.data.body, severity_text: row.data.severity_text, trace_id: row.data.trace_id } });
 function wireTransport(rows: WireRow[]) {
+  const wireRows = rows.map((row, index) => ({ ...row, data: { id: `row-${index}`, ...row.data } }));
   return async (path: string, request: any) => {
     expect(path).toBe("/api/v5/query_range");
     const results = request.compositeQuery.queries.map(({ spec }: any) => {
-      const selected = rows.filter((row) => !spec.filter?.expression || evaluate(spec.filter.expression, wireFields(row)));
+      const selected = wireRows.filter((row) => !spec.filter?.expression || evaluate(spec.filter.expression, wireFields(row)));
       expect(request.requestType).toBe("raw");
       return { queryName: spec.name, rows: selected.slice(spec.offset ?? 0, (spec.offset ?? 0) + spec.limit) };
     });

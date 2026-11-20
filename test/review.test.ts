@@ -173,7 +173,7 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
     it(`${field}=${spelling} selects and counts as ${expected}`, () => {
       const body = JSON.stringify({ [field]: spelling, msg: "ordinary request" });
       const cwFields = { "@timestamp": NOW - 1000, [field]: spelling, msg: "ordinary request", "@message": body };
-      const szFields = { log: { body, severity_text: "INFO" } };
+      const szFields = { log: { body, severity_text: spelling } };
       expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
       expect(szRow({ data: { body, severity_text: "INFO" } }).level).toBe(expected);
       for (const minLevel of levels) {
@@ -181,7 +181,7 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
         if (selected) expect(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields)).toBeDefined();
         expect(matchesRecord(cwRow([{ field: "@message", value: body }]), { minLevel })).toBe(selected);
         const filter = buildFilter({ ...range, minLevel, limit: 10 });
-        if (selected) expect(filter ? Boolean(evaluate(filter, szFields)) : true).toBe(true);
+        expect(evaluate(filter, szFields)).toBe(selected);
         expect(matchesRecord(szRow({ data: { body, severity_text: "INFO" } }), { minLevel })).toBe(selected);
       }
     });
@@ -200,17 +200,21 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
   it.each([
     ["Error: connection refused", "error"], ["panic: Error", "fatal"], ["Traceback: failed", "error"],
     ["Warning: slow", "warn"], ["noteworthy request", "-"], ["errorless", "-"], ["{Error: broken", "error"], ['{"error":"failed"}', "error"],
-  ])("infers %s consistently as %s", (body, expected) => {
+  ])("infers %s consistently as %s", async (body, expected) => {
     const cwFields = { "@timestamp": NOW - 1000, "@message": body };
     const szFields = { log: { body, severity_text: "" } };
+    const source = signoz({ endpoint: "http://x" }, "t", async (_path, request: any) => {
+      const { expression } = request.compositeQuery.queries[0].spec.filter;
+      const rows = evaluate(expression, szFields) ? [{ data: szFields.log }] : [];
+      return { data: { data: { results: [{ rows }] } } };
+    });
     expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
     expect(szRow({ data: szFields.log }).level).toBe(expected);
     for (const minLevel of ["warn", "error", "fatal"] as const) {
       const selected = levels.indexOf(expected as any) >= levels.indexOf(minLevel);
       if (selected) expect(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields)).toBeDefined();
       expect(matchesRecord(cwRow([{ field: "@message", value: body }]), { minLevel })).toBe(selected);
-      if (selected) expect(evaluate(buildFilter({ ...range, minLevel, limit: 10 }), szFields)).toBe(true);
-      expect(matchesRecord(szRow({ data: szFields.log }), { minLevel })).toBe(selected);
+      expect((await source.query({ ...range, minLevel, limit: 10 })).rows).toHaveLength(selected ? 1 : 0);
     }
   });
 });

@@ -8,7 +8,7 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { signozKey, validKey } from "../lib/credentials.js";
-import { ID_FIELDS, INFERRED_LEVEL_WORDS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
+import { ID_FIELDS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
@@ -94,36 +94,31 @@ function numberLevel(value: unknown) {
   return typeof value === "number" && Number.isInteger(value) ? OTEL_SEVERITY_LEVELS[Math.floor((value - 1) / 4)] : undefined;
 }
 
-/** The v5 candidate filter expression for a LogQuery. Exported for tests. */
+/** The v5 filter expression for a LogQuery. Exported for tests. */
 export function buildFilter(q: LogQuery): string {
   const groups: string[] = [];
   if (q.minLevel) {
     const levels = levelsAtLeast(q.minLevel);
     const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
-    const words = new Set(INFERRED_LEVEL_WORDS.flatMap(([level, words]) => levels.includes(level) ? [...words] : []));
     groups.push(any([
       `log.severity_number >= ${OTEL_SEVERITY_LEVELS.indexOf(q.minLevel) * 4 + 1}`,
       ...SEVERITY_FIELDS.flatMap((field) => aliases.map((alias) => `${field} ILIKE ${quote(alias)}`)),
-      ...aliases.filter((alias) => !words.has(alias)).map((alias) => contains(`"${alias}"`)),
-      ...[...words].map(contains),
     ]));
   }
   if (q.service && q.service !== "-") {
     const names = serviceAliases(q.service);
     const list = names.map(quote).join(", ");
-    groups.push(any([`resource.service.name IN (${list})`, `attribute.service IN (${list})`, ...names.map((name) => contains(`"${name}"`))]));
+    groups.push(any([`resource.service.name IN (${list})`, `attribute.service IN (${list})`]));
   }
   if (q.id) {
     const hex = /^[0-9a-f]{32}$/i.test(q.id);
     const id = quote(q.id);
     const matches = ID_FIELDS.map((field) => `attribute.${field} ${hex ? "ILIKE" : "="} ${id}`);
     if (hex) matches.push(`log.trace_id = ${quote(q.id.toLowerCase())}`);
-    groups.push(any([...matches, contains(q.id)]));
+    groups.push(any(matches));
   }
-  const structured = groups.join(" AND ");
-  if (!q.text) return structured;
-  const text = contains(q.text);
-  return structured ? any([structured, text]) : text;
+  if (q.text) groups.push(contains(q.text));
+  return groups.join(" AND ");
 }
 
 export function rawRequest(q: LogQuery, offset = 0, expression = buildFilter(q)): unknown {
@@ -166,6 +161,18 @@ function results(payload: unknown): V5Result[] {
 
 const NOISE = /^(log\.|code\.|telemetry\.|otel\.)/;
 const rawBody = (body: unknown) => body == null ? "" : typeof body === "string" ? body : JSON.stringify(body);
+
+function matchesBodyText(body: unknown, text: string): boolean {
+  const message = body && typeof body === "object" ? str((body as Record<string, unknown>).message) : undefined;
+  return (message?.toLowerCase().includes(text) ?? false) || rawBody(body).toLowerCase().includes(text);
+}
+
+function wireTime(value: unknown): string {
+  const time = isoTime(value) ?? "";
+  if (!time) return "";
+  const subMillis = typeof value === "string" ? /\.\d{3}(\d{1,6})/.exec(value)?.[1] : undefined;
+  return time.slice(0, -1) + (subMillis ?? "").padEnd(6, "0");
+}
 
 /** One v5 raw row -> a LogRecord. Exported for tests. */
 export function parseRow(row: { timestamp?: unknown; data?: Record<string, unknown> }): LogRecord {
@@ -216,34 +223,46 @@ class SignozSource implements Source {
   async query(q: LogQuery): Promise<QueryResult<LogRecord>> {
     if (q.service && !SAFE_TOKEN.test(q.service)) throw new AxiError(`invalid service name \`${q.service}\``, { exitCode: 2 });
     if (q.id && !SAFE_TOKEN.test(q.id)) throw new AxiError(`invalid id \`${q.id}\``, { exitCode: 2 });
-    const rows: LogRecord[] = [];
+    const rows: { record: LogRecord; id: string; time: string }[] = [];
     const seen = new Set<string>();
     const pageSize = Math.min(1000, q.minLevel || q.service || q.id || q.text ? Math.max(100, q.limit) : q.limit);
     const text = q.text?.toLowerCase();
-    const candidateFilter = buildFilter(q);
-    for (const expression of candidateFilter ? ["", candidateFilter] : [""]) {
+    const filter = buildFilter(q);
+    let remaining = MAX_SCAN;
+    let usedFallback = false;
+    scan: for (const expression of filter ? [filter, ""] : [""]) {
       let offset = 0;
-      while (offset < MAX_SCAN) {
-        const limit = Math.min(pageSize, MAX_SCAN - offset);
+      usedFallback = filter !== "" && expression === "";
+      while (remaining > 0) {
+        const limit = Math.min(usedFallback ? 1000 : pageSize, remaining);
         const page = results(await this.request("/api/v5/query_range", rawRequest({ ...q, limit }, offset, expression))).flatMap((result) => result.rows ?? []);
         offset += page.length;
+        remaining -= page.length;
         for (const row of page) {
           const id = str(row.data?.id);
           if (id) {
             if (seen.has(id)) continue;
             seen.add(id);
           }
-          if (text && !rawBody(row.data?.body).toLowerCase().includes(text)) continue;
+          if (text && !matchesBodyText(row.data?.body, text)) continue;
           if (q.id && !matchesRowId(row.data ?? {}, q.id)) continue;
           const record = parseRow(row);
           if (!matchesRecord(record, q)) continue;
-          rows.push(record);
-          if (rows.length === q.limit) return { rows, partial: expression !== "" };
+          rows.push({ record, id: id ?? "", time: wireTime(row.timestamp ?? row.data?.timestamp) });
+          if (rows.length === q.limit) break scan;
         }
-        if (page.length < limit) return { rows, partial: expression !== "" };
+        if (page.length < limit) break;
       }
+      if (remaining <= 0) break;
     }
-    return { rows, partial: true };
+    if (usedFallback) {
+      rows.sort((a, b) => {
+        if (a.time !== b.time) return a.time > b.time ? -1 : 1;
+        if (a.id === b.id) return 0;
+        return a.id > b.id ? -1 : 1;
+      });
+    }
+    return { rows: rows.map(({ record }) => record), partial: remaining <= 0 && rows.length < q.limit };
   }
 
   async serviceCounts(range: TimeRange): Promise<QueryResult<ServiceCount>> {
