@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildQuery, cloudwatch, parseRow as cwRow } from "../src/sources/cloudwatch.js";
 import { buildFilter, parseRow as szRow, signoz } from "../src/sources/signoz.js";
 import { template } from "../src/lib/template.js";
@@ -75,6 +75,37 @@ describe("signoz", () => {
     const request = buildFilter({ ...range, id: "req-1", limit: 1 });
     expect(evaluate(request, { attribute: { requestId: "req-1" } })).toBe(true);
     expect(evaluate(request, { attribute: { residentId: "req-1" } })).toBe(false);
+  });
+
+  // SigNoz compiles `body.<key>` to ClickHouse JSON_VALUE; deployments without JSON
+  // functions answer HTTP 500, which broke `errors`, `--level`, `--service` and `trace`.
+  it("never filters on body.<key>, and still matches JSON bodies through log.body", () => {
+    const queries = [
+      { minLevel: "warn" as const }, { minLevel: "error" as const, service: "case-service" },
+      { id: "req-1" }, { id: "4BF92F3577B34DA6A3CE929D0E0E4736" }, { text: "body.level" },
+    ];
+    for (const q of queries) {
+      const filter = buildFilter({ ...range, limit: 1, ...q });
+      expect(filter.replaceAll("log.body", "").replace(/'(?:\\.|[^'\\])*'/g, "''")).not.toMatch(/\bbody\./);
+    }
+    const body = JSON.stringify({ level: "ERROR", service: "case", requestId: "req-1", msg: "synthetic" });
+    expect(evaluate(buildFilter({ ...range, minLevel: "error", service: "case-service", limit: 1 }), { log: { body } })).toBe(true);
+    expect(evaluate(buildFilter({ ...range, minLevel: "error", limit: 1 }), { log: { body: body.replace("ERROR", "info").replace("synthetic", "ok") } })).toBe(false);
+    expect(evaluate(buildFilter({ ...range, id: "req-1", limit: 1 }), { log: { body } })).toBe(true);
+    expect(evaluate(buildFilter({ ...range, id: "req-2", limit: 1 }), { log: { body } })).toBe(false);
+  });
+
+  it("labels a SigNoz 500 with its error type and ClickHouse code, never its message", async () => {
+    vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test-key");
+    const payload = { status: "error", error: { type: "internal", code: "unknown", message: "code: 48, message: synthetic-provider-text" } };
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify(payload), { status: 500 }));
+    try {
+      const src = signoz({ endpoint: "http://x" }, "t");
+      await expect(src.query({ ...range, limit: 1 })).rejects.toThrow(/^signoz: HTTP 500: query failed \(internal, ClickHouse code 48\)$/);
+    } finally {
+      fetch.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 
   it("parses a raw row: body, severity, resource service, attributes, trace id", () => {

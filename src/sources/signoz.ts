@@ -35,8 +35,13 @@ function validate(raw: Record<string, unknown>, label: string): SignozEnv {
 function providerError(status: number | "error", payload?: unknown, key?: string): AxiError {
   const details = payload as { code?: unknown; type?: unknown; error?: { code?: unknown; type?: unknown } } | undefined;
   const auth = status === 401 || status === 403;
-  const code = !auth && key && [details?.error?.code, details?.error?.type, details?.code, details?.type].find((value): value is string => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value) && !value.includes(key));
-  return new AxiError(`signoz: ${status === "error" ? status : `HTTP ${status}`}: query failed${code ? ` (${code})` : ""}`, {
+  // only fixed-shape tokens, never provider text: a message can quote log rows or the key
+  const safe = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value) && value !== "unknown" && !value.includes(key!);
+  const code = !auth && key ? [details?.error?.code, details?.error?.type, details?.code, details?.type].find(safe) : undefined;
+  const message = (details as { error?: { message?: unknown }; message?: unknown } | undefined)?.error?.message ?? (details as { message?: unknown } | undefined)?.message;
+  const clickhouse = !auth && key && typeof message === "string" ? /^code: (\d{1,4}),/.exec(message)?.[1] : undefined;
+  const reason = [code, clickhouse && !clickhouse.includes(key!) ? `ClickHouse code ${clickhouse}` : undefined].filter(Boolean).join(", ");
+  return new AxiError(`signoz: ${status === "error" ? status : `HTTP ${status}`}: query failed${reason ? ` (${reason})` : ""}`, {
     help: [auth ? "Check your viewer key with `logs-axi signoz login`" : "Check the SigNoz endpoint configuration and query filters"],
   });
 }
@@ -83,26 +88,41 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
 const lit = (s: string, like = false) =>
   "'" + (like ? s.replace(/[\\%_]/g, "\\$&") : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
 
-const LEVEL_FIELDS = ["body.level", "body.severity", "body.severity_text", "attribute.level", "attribute.severity", "attribute.severity_text", "log.severity_text"];
-const SERVICE_FILTER_FIELDS = ["body.service", "resource.service.name", "attribute.service"];
+const LEVEL_FIELDS = ["attribute.level", "attribute.severity", "attribute.severity_text", "log.severity_text"];
+const SERVICE_FILTER_FIELDS = ["resource.service.name", "attribute.service"];
 const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * `"key": "value"` in the raw body text, case-insensitively. Never `body.<key>`: SigNoz
+ * compiles that to ClickHouse JSON_VALUE, which deployments without JSON functions reject
+ * with HTTP 500. A wider match is fine, rows are re-checked by matchesRecord.
+ */
+const bodyPair = (keys: readonly string[], values: string[]) =>
+  `log.body REGEXP ${lit(`(?i)"(${keys.join("|")})"\\s*:\\s*"(${values.map(escapeRegex).join("|")})"`)}`;
 
 /** The v5 filter expression for a LogQuery. Exported for tests. */
 export function buildFilter(q: LogQuery): string {
   const parts: string[] = [];
-  if (q.service && q.service !== "-") parts.push(any(SERVICE_FILTER_FIELDS.map((field) => `${field} IN (${serviceAliases(q.service!).map((name) => lit(name)).join(", ")})`)));
+  if (q.service && q.service !== "-") {
+    const names = serviceAliases(q.service);
+    parts.push(any([...SERVICE_FILTER_FIELDS.map((field) => `${field} IN (${names.map((name) => lit(name)).join(", ")})`), bodyPair(["service"], names)]));
+  }
   if (q.minLevel && q.minLevel !== "debug") {
     const levels = levelsAtLeast(q.minLevel);
     const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
     parts.push(any([
       ...LEVEL_FIELDS.map((field) => `${field} REGEXP ${lit("(?i)^(" + aliases.join("|") + ")$")}`),
-      ...["body.msg", "body.message", "log.body"].flatMap((field) => INFERRED_LEVELS.filter(([level]) => levels.includes(level)).map(([, pattern]) => `${field} REGEXP ${lit("(?i)" + pattern)}`)),
+      bodyPair(["level", "severity", "severity_text"], aliases),
+      ...INFERRED_LEVELS.filter(([level]) => levels.includes(level)).map(([, pattern]) => `log.body REGEXP ${lit("(?i)" + pattern)}`),
     ]));
   }
   if (q.text) parts.push(`log.body CONTAINS ${lit(q.text, true)}`);
   if (q.id) {
-    const matches = ID_FIELDS.flatMap((field) => ["body", "attribute"].map((context) => /^[0-9a-f]{32}$/i.test(q.id!) ? `${context}.${field} REGEXP ${lit("(?i)^" + q.id + "$")}` : `${context}.${field} = ${lit(q.id!)}`));
-    if (/^[0-9a-f]{32}$/i.test(q.id)) matches.push(`log.trace_id = ${lit(q.id.toLowerCase())}`);
+    const hex = /^[0-9a-f]{32}$/i.test(q.id);
+    const matches = ID_FIELDS.map((field) => hex ? `attribute.${field} REGEXP ${lit("(?i)^" + q.id + "$")}` : `attribute.${field} = ${lit(q.id!)}`);
+    matches.push(bodyPair(ID_FIELDS, [q.id]));
+    if (hex) matches.push(`log.trace_id = ${lit(q.id.toLowerCase())}`);
     parts.push(any(matches));
   }
   return parts.join(" AND ");
