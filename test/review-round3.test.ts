@@ -109,7 +109,7 @@ function wireTransport(rows: WireRow[]) {
     const results = request.compositeQuery.queries.map(({ spec }: any) => {
       const selected = wireRows.filter((row) => !spec.filter?.expression || evaluate(spec.filter.expression, wireFields(row)));
       expect(request.requestType).toBe("raw");
-      return { queryName: spec.name, rows: selected.slice(spec.offset ?? 0, (spec.offset ?? 0) + spec.limit) };
+      return { queryName: spec.name, rows: selected.slice(0, spec.limit) };
     });
     return { status: "success", data: { data: { results } } };
   };
@@ -124,7 +124,7 @@ it("SigNoz context predicates obey its documented context rules and count confli
   expect(matchesRecord(szRow(input), { minLevel: "error" })).toBe(false);
   const transport = wireTransport([input]);
   const src = signoz({ endpoint: "http://x" }, "t", transport);
-  expect(await src.query({ ...range, minLevel: "error", limit: 10 })).toEqual({ rows: [], partial: false });
+  expect(await src.query({ ...range, minLevel: "error", limit: 10 })).toEqual({ rows: [szRow(input)], partial: false });
   expect(await src.serviceCounts(range)).toEqual({ rows: [{ service: "case-service", level: "warn", count: 1 }], partial: false });
 });
 
@@ -174,12 +174,13 @@ it.each([
   [{}, { "service.name": "" }, { service: "case-service" }, "case-service"],
   [{}, {}, { service: "case-service" }, "case-service"],
   [{}, {}, {}, "-"],
-] as const)("SigNoz service precedence agrees for rendering, selection and counts: %j", async (body, resource, attribute, expected) => {
+] as const)("SigNoz preserves service display and counts for provider-selected rows: %j", async (body, resource, attribute, expected) => {
   const input = row({ body: JSON.stringify({ level: "error", msg: "failed", ...body }), severity_text: "ERROR", resources_string: resource, attributes_string: attribute });
   expect(szRow(input).service).toBe(expected);
   const src = signoz({ endpoint: "http://x" }, "t", wireTransport([input]));
   expect((await src.query({ ...range, service: expected === "-" ? "-" : "case", limit: 10 })).rows).toHaveLength(1);
-  expect((await src.query({ ...range, service: "other", limit: 10 })).rows).toHaveLength(0);
+  const other = await src.query({ ...range, service: "other", limit: 10 });
+  expect(other.rows).toEqual("service.name" in resource && resource["service.name"] === "other-service" ? [szRow(input)] : []);
   expect(await src.serviceCounts(range)).toEqual({ rows: [{ service: expected, level: "error", count: 1 }], partial: false });
 });
 

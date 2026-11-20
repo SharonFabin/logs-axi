@@ -96,11 +96,13 @@ export function parseLine(raw: string, fallback: { time: string; service: string
 }
 
 /** A plain-text line's level, guessed from its words. Only used when the line has no level field. */
-export const INFERRED_LEVELS = [
-  ["fatal", String.raw`\b(fatal|panic)\b`],
-  ["error", String.raw`\b(error|exception|traceback)\b`],
-  ["warn", String.raw`\bwarn(ing)?\b`],
+export const INFERRED_LEVEL_WORDS = [
+  ["fatal", ["fatal", "panic"]],
+  ["error", ["error", "exception", "traceback"]],
+  ["warn", ["warn", "warning"]],
 ] as const;
+
+export const INFERRED_LEVELS = INFERRED_LEVEL_WORDS.map(([level, words]) => [level, String.raw`\b(${words.join("|")})\b`] as const);
 
 function inferLevel(text: string): string | undefined {
   return INFERRED_LEVELS.find(([, pattern]) => new RegExp(pattern, "i").test(text))?.[0];

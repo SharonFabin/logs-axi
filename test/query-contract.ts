@@ -64,6 +64,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     return lookup(t.value);
   };
   const compare = (): any => {
+    const field = input[at]?.value;
     const left = primary();
     const op = String(input[at]?.value).toLowerCase();
     if (op === "in") {
@@ -80,19 +81,30 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       const right = primary();
       return op === ">=" ? left >= right : left <= right;
     }
-    if (["=", "like", "ilike", "contains"].includes(op)) {
+    if (["=", "like", "ilike", "contains", "regexp"].includes(op)) {
       at++;
       const right = primary();
       if (op === "=") return left === right;
       const text = String(left ?? "");
       if (op === "ilike") return text.toLowerCase() === String(right).toLowerCase();
+      if (op === "regexp") {
+        const foldBody = field === "log.body";
+        const pattern = foldBody ? right.toLowerCase() : right;
+        const ignoreCase = pattern.startsWith("(?i)");
+        return new RegExp(ignoreCase ? pattern.slice(4) : pattern, ignoreCase ? "i" : "").test(foldBody ? text.toLowerCase() : text);
+      }
       return op === "contains" ? text.toLowerCase().includes(String(right).replace(/\\([\\%_])/g, "$1").toLowerCase())
         : right instanceof RegExp ? right.test(text)
         : text.includes(right);
     }
     return left;
   };
-  const and = (): any => { let value = compare(); while (is("and")) { at++; const right = compare(); value = value && right; } return value; };
+  const unary = (): any => {
+    if (!is("not")) return compare();
+    at++;
+    return !unary();
+  };
+  const and = (): any => { let value = unary(); while (is("and")) { at++; const right = unary(); value = value && right; } return value; };
   const or = (): any => { let value = and(); while (is("or")) { at++; const right = and(); value = value || right; } return value; };
   const value = or();
   if (at !== input.length) throw new Error(`unconsumed query: ${input.slice(at).map((t) => t.value).join(" ")}`);

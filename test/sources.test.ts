@@ -93,19 +93,11 @@ describe("signoz", () => {
   });
 
   it.each([
-    { query: { minLevel: "fatal" }, body: '{"Level":"CRIT"}' },
-    { query: { minLevel: "error" }, body: String.raw`{"Message":"failed:\nexception"}` },
-    { query: { service: "case-service" }, body: '{"Service":"case"}' },
-    { query: { service: "case-service" }, body: '{"service":"Case"}' },
-    { query: { id: "req-1" }, body: '{"RequestId":"req-1"}' },
-    { query: { id: "req-1" }, body: '{"requestId":"REQ-1"}' },
-    { query: { id: "4BF92F3577B34DA6A3CE929D0E0E4736" }, body: '{"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"}' },
     { query: { minLevel: "error" }, body: String.raw`{"level":"info","msg":"completed job \"sync\""}` },
-    { query: { minLevel: "fatal" }, body: '{"context":{"severity":"critical"}}' },
-    { query: { minLevel: "error" }, body: String.raw`{"msg":"complete","context":{"message":"failed:\nexception"}}` },
-    { query: { service: "case" }, body: '{"context":{"service":"case"}}' },
-    { query: { id: "req-1" }, body: '{"context":{"requestId":"req-1"}}' },
-  ] as const)("rejects a nonmatching decoded body $body", async ({ query, body }) => {
+    { query: { minLevel: "error" }, body: '{"level":"info","msg":"error budget"}' },
+    { query: { service: "case" }, body: '{"relatedService":"case"}' },
+    { query: { id: "req-1" }, body: '{"residentId":"req-1"}' },
+  ] as const)("excludes unrelated string-body text $body", async ({ query, body }) => {
     expect(await sourceForBody(body).query({ ...range, ...query, limit: 1 })).toEqual({ rows: [], partial: false });
   });
 
@@ -149,6 +141,13 @@ describe("signoz", () => {
     expect(szRow({ data: { body: "failed", severity_number: 17, severity_text: "info" } }).level).toBe("info");
     expect(szRow({ data: { body: "failed", severity_number: 17, attributes_string: { level: "warn" } } }).level).toBe("warn");
     expect(szRow({ data: { body: { level: "warn" }, severity_number: 17 } }).level).toBe("warn");
+  });
+
+  it.each([
+    ["TRACE4", "debug"], ["DEBUG2", "debug"], ["INFO3", "info"],
+    ["Warn4", "warn"], ["ERROR2", "error"], ["FATAL3", "fatal"],
+  ])("normalizes the OpenTelemetry label %s for display", (severity_text, level) => {
+    expect(szRow({ data: { body: "request", severity_text } }).level).toBe(level);
   });
 
   it("surfaces an API error", async () => {

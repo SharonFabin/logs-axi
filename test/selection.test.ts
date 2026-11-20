@@ -34,7 +34,14 @@ function signozWire(rows: Row[]) {
         candidates = rows.filter((r) => !expression || evaluate(expression, fields(r)));
         candidateSets.set(expression, candidates);
       }
-      const page = candidates.slice(spec.offset, spec.offset + spec.limit);
+      expect(spec.order).toEqual([
+        { key: { name: "timestamp" }, direction: "desc" },
+        { key: { name: "id" }, direction: "desc" },
+      ]);
+      const page = candidates.toSorted((a, b) => {
+        if (a.timestamp !== b.timestamp) return a.timestamp < b.timestamp ? 1 : -1;
+        return a.data.id < b.data.id ? 1 : a.data.id > b.data.id ? -1 : 0;
+      }).slice(0, spec.limit);
       pageSizes.push(page.length);
       return { queryName: spec.name, rows: page };
     });
@@ -87,8 +94,8 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
     expect(result.partial).toBe(false);
     expect(result.rows).toHaveLength(1000);
     expect(result.rows.every((item) => item.count === 1 && item.level === "error")).toBe(true);
-    expect(test.requests).toHaveLength(provider === "cloudwatch" ? 1 : 2);
-    if (provider === "signoz") expect(test.requests.every((request) => request.requestType === "raw")).toBe(true);
+    expect(test.requests).toHaveLength(1);
+    if (provider === "signoz") expect(test.requests[0].requestType).toBe("raw");
   });
   it.each([50, false, null, "", [], {}])("ignores a non-string/empty level, severity, message or service override: %j", async (invalid) => {
     const bodies = [
@@ -107,32 +114,26 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
       expect(await test.source.serviceCounts(range)).toEqual({ rows: [{ level: "error", service: "case", count: 1 }], partial: false });
     }
   });
-  it("fills the requested limit after rejecting newer candidate rows", async () => {
-    const count = provider === "signoz" ? 1050 : 150;
-    const candidates = Array.from({ length: count }, (_, i) => row({ level: "warn", severity: "error", msg: "Error: bait", service: "case" }, i));
-    candidates.push(row({ level: 50, severity: "error", msg: "first", service: "case" }, count), row({ level: false, severity: "error", msg: "second", service: "case" }, count + 1));
+  it("CloudWatch fills the requested limit after rejecting newer candidate rows", async () => {
+    if (provider !== "cloudwatch") return;
+    const candidates = Array.from({ length: 150 }, (_, i) => row({ level: "warn", severity: "error", msg: "Error: bait", service: "case" }, i));
+    candidates.push(row({ level: 50, severity: "error", msg: "first", service: "case" }, 150), row({ level: false, severity: "error", msg: "second", service: "case" }, 151));
     const test = create(candidates);
     const result = await test.source.query({ ...range, minLevel: "error", limit: 2 });
     expect(result).toMatchObject({ partial: false });
     expect(result.rows.map((r) => r.msg)).toEqual(["first", "second"]);
-    if (provider === "signoz") expect(test.requests.some((r) => r.compositeQuery.queries[0].spec.offset >= 100)).toBe(true);
-    else expect(test.requests[0].limit).toBeGreaterThan(2);
+    expect(test.requests[0].limit).toBeGreaterThan(2);
   });
-  it("uses rendered service while matching every supported original ID", async () => {
+  it("uses each provider's service and ID selection semantics", async () => {
     const input = row({ level: "error", service: "chosen", requestId: "chosen-id", msg: "failed" }, 0, { attributes_string: { service: "ignored", requestId: "ignored-id" }, resources_string: { "service.name": "ignored" } });
     const test = create([input]);
-    expect((await test.source.query({ ...range, service: provider === "cloudwatch" ? "case" : "ignored", limit: 1 })).rows).toEqual([]);
+    expect((await test.source.query({ ...range, service: provider === "cloudwatch" ? "case" : "ignored", limit: 1 })).rows).toHaveLength(provider === "signoz" ? 1 : 0);
     expect((await test.source.query({ ...range, id: "ignored-id", limit: 1 })).rows).toHaveLength(provider === "signoz" ? 1 : 0);
     expect((await test.source.query({ ...range, id: "chosen-id", service: "chosen", limit: 1 })).rows).toHaveLength(1);
   });
-  it("reports an unfinished scan instead of claiming an empty complete result", async () => {
-    const candidates = Array.from({ length: scanLimit + 1 }, (_, i) => {
-      if (provider === "signoz") {
-        const body = { level: i === scanLimit ? "error" : "info", message: 'completed job "sync"' };
-        return row(body, i, { body });
-      }
-      return row({ level: i === scanLimit ? "error" : "warn", severity: "error", msg: "Error: bait" }, i);
-    });
+  it("CloudWatch reports an unfinished scan instead of claiming an empty complete result", async () => {
+    if (provider !== "cloudwatch") return;
+    const candidates = Array.from({ length: scanLimit + 1 }, (_, i) => row({ level: i === scanLimit ? "error" : "warn", severity: "error", msg: "Error: bait" }, i));
     const test = create(candidates);
     const result = await test.source.query({ ...range, minLevel: "error", limit: 1 });
     expect(result).toEqual({ rows: [], partial: true });
@@ -169,35 +170,25 @@ it("SigNoz counts normalized body services using only raw requests", async () =>
   expect(wire.requests).toHaveLength(1);
 });
 
-it.each([
-  { body: { level: "ERROR" }, msg: "connection refused" },
-  { body: { msg: "failed:\nexception while opening socket" }, msg: "failed:\nexception while opening socket" },
-])("SigNoz selects native JSON logs with decoded message $msg", async ({ body, msg }) => {
-  const match = { service: "case-service", requestId: "req-1", detail: { label: "socket_100%" }, message: "connection refused", ...body };
-  const info = { ...match, level: "info", service: "other", requestId: "req-2", detail: { label: "socketX100X" } };
-  const wire = signozWire([row(info, 0, { body: info }), row(match, 1, { body: match })]);
-  const execute = async (...args: string[]) => {
-    const result = await run(["signoz", "dev", ...args, "--json"], { config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport } });
-    expect(result.code).toBe(0);
-    return JSON.parse(result.out);
-  };
-
-  for (const args of [["errors"], ["errors", "--service", "case"]]) {
-    expect((await execute(...args)).groups).toMatchObject([{ count: 1, service: "case-service", sample: "req-1" }]);
-  }
+it("SigNoz uses native message and metadata predicates for JSON-native rows", async () => {
+  const body = { requestId: "body-only", message: "connection refused" };
+  const match = row(body, 1, { body, severity_number: 17, resources_string: { "service.name": "case" }, attributes_string: { requestId: "req-1" } });
+  const info = row(body, 0, { body, severity_number: 9, resources_string: { "service.name": "other" } });
+  const wire = signozWire([info, match]);
+  const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport } };
   for (const args of [
-    ["search", "REQ-1"],
-    ["search", "REQ-1", "--level", "error"],
-    ["search", "REQ-1", "--service", "case"],
-    ["search", "SOCKET_100%"],
-    ["search", "--level", "error"],
     ["search", "CONNECTION", "--level", "error", "--service", "case"],
     ["search", "--service", "case"],
     ["trace", "req-1", "--level", "error", "--service", "case"],
   ]) {
-    expect((await execute(...args)).lines).toMatchObject([{ msg, level: "error", service: "case-service" }]);
+    const result = await run(["signoz", "dev", ...args, "--json"], deps);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.out).lines).toMatchObject([{ msg: "connection refused", level: "error", service: "case" }]);
   }
-  expect((await execute("search", "not in the body", "--level", "error")).lines).toBe(0);
+  const result = await run(["signoz", "dev", "search", "body-only", "--level", "error", "--json"], deps);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.out).lines).toBe(0);
+  expect(wire.pageSizes).toEqual([1, 1, 1, 0]);
 });
 
 it.each([
@@ -207,6 +198,7 @@ it.each([
   { query: { id: "ABCDEF0123456789ABCDEF0123456789" }, metadata: { trace_id: "abcdef0123456789abcdef0123456789" } },
   { query: { id: "req-1" }, metadata: { attributes_string: { requestId: "req-1" } } },
   { query: { text: "needle" }, metadata: {} },
+  { query: { text: "needle", minLevel: "error", service: "case" }, metadata: { body: '{"level":"error","service":"case","message":"needle found"}' } },
   {
     query: { text: "needle", minLevel: "error", service: "case", id: "req-1" },
     metadata: { attributes_string: { requestId: "req-1", service: "case", severity: "Critical" } },
@@ -229,44 +221,34 @@ it.each(['JOB "SYNC"', "job\nsync"])("SigNoz matches literal native messages for
   expect(await source.query({ ...range, text, limit: 1 })).toMatchObject({ partial: false, rows: [{ msg: "rendered summary" }] });
   expect(wire.pageSizes).toEqual([1]);
 
-  const bodyOnly = { ...body, service: "case", level: "error" };
-  const compatibility = signozWire([row(bodyOnly, 0, { body: bodyOnly })]);
-  const fallback = signoz({ endpoint: "http://x" }, "test", compatibility.transport);
-  expect(await fallback.query({ ...range, text, minLevel: "error", service: "case", limit: 1 })).toMatchObject({ partial: false, rows: [{ msg: "rendered summary" }] });
-  expect(compatibility.pageSizes).toEqual([0, 1]);
 });
 
-it("SigNoz adds compatibility matches in wire order and skips repeated IDs", async () => {
-  const body = { message: "connection refused", detail: { tag: "needle" } };
+it("SigNoz applies the limit to the newest provider matches in one request", async () => {
   const wire = signozWire([
-    { ...row(body, 0, { id: "a", body }), timestamp: "2026-11-16T14:00:00.123456789Z" },
-    { ...row("needle in text", 1, { id: "z" }), timestamp: "2026-11-16T14:00:00.123Z" },
+    row("older native error", 2, { severity_number: 17 }),
+    row({ level: "error", msg: "newest body error" }, 0),
+    row({ level: "error", msg: "second body error" }, 1),
   ]);
   const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
-  const result = await source.query({ ...range, text: "needle", limit: 3 });
-  expect(result.rows.map(({ msg }) => msg)).toEqual(["connection refused", "needle in text"]);
+  const result = await source.query({ ...range, minLevel: "error", limit: 2 });
+  expect(result.rows.map(({ msg }) => msg)).toEqual(["newest body error", "second body error"]);
   expect(result.partial).toBe(false);
-  expect(wire.pageSizes).toEqual([1, 2]);
+  expect(wire.pageSizes).toEqual([2]);
+  expect(wire.requests[0].compositeQuery.queries[0].spec.limit).toBe(2);
 });
 
-it("SigNoz counts repeated rows against the same budget across both scans", async () => {
-  const wire = signozWire([
-    row("native error", 0, { severity_number: 17 }),
-    row({ level: "error", msg: "body error" }, 1),
-    ...Array.from({ length: scanLimit - 3 }, (_, i) => row("routine", i + 2, { severity_number: 9 })),
-    row({ level: "error", msg: "beyond budget" }, scanLimit - 1),
-  ]);
+it("SigNoz returns an underfilled legacy text result after one request", async () => {
+  const wire = signozWire([row("unrelated", 0), row("needle found", 1)]);
   const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
-  const result = await source.query({ ...range, minLevel: "error", limit: 3 });
-  expect(result.rows.map(({ msg }) => msg)).toEqual(["native error", "body error"]);
-  expect(result.partial).toBe(true);
-  expect(wire.pageSizes.reduce((total, count) => total + count, 0)).toBe(scanLimit);
+  expect(await source.query({ ...range, text: "needle", limit: 50 })).toMatchObject({ partial: false, rows: [{ msg: "needle found" }] });
+  expect(wire.pageSizes).toEqual([1]);
+  expect(wire.requests[0].compositeQuery.queries[0].spec.limit).toBe(50);
 });
 
 it("SigNoz uses numeric severity for CLI filters, grouping, and service counts", async () => {
   const wire = signozWire([
     row("routine operation", 0, { severity_number: 16, resources_string: { "service.name": "case" } }),
-    row("connection refused", 1, { severity_number: 17, resources_string: { "service.name": "case" } }),
+    row("connection refused", 1, { severity_number: 18, severity_text: "ERROR2", resources_string: { "service.name": "case" } }),
   ]);
   const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport } };
   const search = await run(["signoz", "dev", "search", "--level", "error", "--json"], deps);
@@ -280,17 +262,14 @@ it("SigNoz uses numeric severity for CLI filters, grouping, and service counts",
   expect(JSON.parse(services.out).services).toEqual([{ service: "case", lines: 2, errors: 1, warns: 1 }]);
 });
 
-it("SigNoz trace checks decoded field names and values with exact case", async () => {
-  const body = { service: "case", level: "error", msg: "selected" };
+it("SigNoz trace uses exact operational IDs from provider attributes", async () => {
   const wire = signozWire([
-    row({ ...body, requestId: "REQ-1", msg: "wrong ID case" }, 0),
-    row({ ...body, RequestId: "req-1", msg: "wrong key case" }, 1),
-    row({ ...body, service: "Case", requestId: "req-1", msg: "wrong service case" }, 2),
-    row({ ...body, context: { requestId: "req-1" }, msg: "nested ID" }, 3),
-    row({ ...body, msg: "invalid native ID" }, 4, { trace_id: "req-1" }),
-    row({ ...body, requestId: "req-1" }, 5),
+    row("wrong ID case", 0, { attributes_string: { requestId: "REQ-1" } }),
+    row("wrong key case", 1, { attributes_string: { RequestId: "req-1" } }),
+    row("invalid native ID", 2, { trace_id: "req-1" }),
+    row("selected", 3, { attributes_string: { requestId: "req-1" } }),
   ]);
-  const result = await run(["signoz", "dev", "trace", "req-1", "--service", "case", "--json"], {
+  const result = await run(["signoz", "dev", "trace", "req-1", "--json"], {
     config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport },
   });
   expect(result.code).toBe(0);
@@ -372,7 +351,7 @@ it.each(["traceId", "trace_id", "requestId", "correlationId", "caseId", "runId"]
     expect((await source.query({ ...range, id: lookup, limit: 10 })).rows.map((record) => record.msg)).toEqual(["body match", "attribute match"]);
     expect((await source.query({ ...range, id: "00000000000000000000000000000001", limit: 10 })).rows).toEqual([]);
   }
-  const wire = signozWire([row({ [field]: "request-A", msg: "case-sensitive operational ID" })]);
+  const wire = signozWire([row("case-sensitive operational ID", 0, { attributes_string: { [field]: "request-A" } })]);
   const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
   expect((await source.query({ ...range, id: "request-A", limit: 1 })).rows).toHaveLength(1);
   expect((await source.query({ ...range, id: "request-a", limit: 1 })).rows).toEqual([]);
@@ -387,19 +366,21 @@ it("SigNoz matches the native trace ID when a body trace ID has display preceden
   expect(result.rows[0]?.traceId).toBe("body-trace");
 });
 
-it("SigNoz matches every original trace representation while retaining level and service filters", async () => {
+it("SigNoz combines provider-visible trace, level, and service predicates", async () => {
   const native = "4bf92f3577b34da6a3ce929d0e0e4736";
   const body = { traceId: "body-trace", trace_id: "body-snake", level: "error", service: "case", msg: "failed" };
   const data = { trace_id: native, attributes_string: { traceId: "attribute-trace", trace_id: "attribute-snake" }, resources_string: { "service.name": "case" } };
   for (const encoded of [true, false]) {
     const input = [
-      row(body, 0, { ...data, ...(encoded ? {} : { body }) }),
-      row({ ...body, level: "warn", severity: "error" }, 1, data),
-      row({ ...body, service: "other" }, 2, data),
+      row(body, 0, { ...data, ...(encoded ? {} : { body, severity_text: "ERROR" }) }),
+      row({ ...body, level: "warn" }, 1, data),
+      row({ ...body, service: "other" }, 2, { ...data, resources_string: { "service.name": "other" } }),
     ];
     const wire = signozWire(input);
     const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
-    for (const id of [native, native.toUpperCase(), "body-trace", "body-snake", "attribute-trace", "attribute-snake"]) {
+    const ids = [native, native.toUpperCase(), "attribute-trace", "attribute-snake"];
+    if (encoded) ids.push("body-trace", "body-snake");
+    for (const id of ids) {
       const result = await source.query({ ...range, id, minLevel: "error", service: "case", limit: 10 });
       expect(result.rows).toHaveLength(1);
       expect(result.rows[0]).toMatchObject({ traceId: "body-trace", level: "error", service: "case" });
@@ -412,7 +393,7 @@ it.each(["requestId", "correlationId", "caseId", "runId"])("SigNoz matches shado
   for (const [inner, outer] of [["inner", "outer"], ["4bf92f3577b34da6a3ce929d0e0e4736", "4BF92F3577B34DA6A3CE929D0E0E4737"]]) {
     const body = { [field]: inner, level: "error", service: "chosen", msg: "failed" };
     const data = { attributes_string: { [field]: outer }, resources_string: { "service.name": "chosen" } };
-    const wire = signozWire([row(body, 0, data), row({ ...body, level: "warn", severity: "error" }, 1, data), row({ ...body, service: "other" }, 2, data)]);
+    const wire = signozWire([row(body, 0, data)]);
     const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
     for (const id of [inner, outer, outer.toLowerCase()]) {
       const result = await source.query({ ...range, id, minLevel: "error", service: "chosen", limit: 10 });
@@ -421,26 +402,6 @@ it.each(["requestId", "correlationId", "caseId", "runId"])("SigNoz matches shado
     }
     expect((await source.query({ ...range, id: "unrelated", limit: 1 })).rows).toEqual([]);
   }
-});
-
-it("SigNoz counts each provider ID once when a late arrival shifts the next offset page", async () => {
-  const initial = Array.from({ length: 1000 }, (_, i) => row({ id: "application-id", service: "case", level: i === 999 ? "error" : "warn", severity: "error", msg: "same payload" }, i));
-  const tail = row({ id: "application-id", service: "case", level: "warn", severity: "error", msg: "same payload" }, 1000);
-  const transport = async (_path: string, request: any) => {
-    expect(request.requestType).toBe("raw");
-    const spec = request.compositeQuery.queries[0].spec;
-    expect(spec.limit).toBe(1000);
-    expect([0, 1000]).toContain(spec.offset);
-    return { status: "success", data: { data: { results: [{ rows: spec.offset === 0 ? initial : [initial[999], tail] }] } } };
-  };
-  const source = signoz({ endpoint: "http://x" }, "test", transport);
-  const all = await source.query({ ...range, limit: 1002 });
-  expect(all.partial).toBe(false);
-  expect(all.rows).toHaveLength(1001);
-  const errors = await source.query({ ...range, minLevel: "error", limit: 1002 });
-  expect(errors.partial).toBe(false);
-  expect(errors.rows).toHaveLength(1);
-  expect(await source.serviceCounts(range)).toEqual({ rows: [{ service: "case", level: "warn", count: 1000 }, { service: "case", level: "error", count: 1 }], partial: false });
 });
 
 it.each(["level", "severity", "severity_text"])("SigNoz ignores numeric/boolean attribute.%s before using native severity", async (field) => {

@@ -171,8 +171,8 @@ export interface Recorder {
   responses: unknown[];
 }
 
-function newest(evs: Event[], limit: number, offset = 0): Event[] {
-  return [...evs].sort((a, b) => (a.time < b.time ? 1 : -1)).slice(offset, offset + limit);
+function newest(evs: Event[], limit: number): Event[] {
+  return [...evs].sort((a, b) => (a.time < b.time ? 1 : -1)).slice(0, limit);
 }
 
 export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], responses: [] }) {
@@ -204,7 +204,7 @@ export function signozStub(evs: Event[], rec: Recorder = { requests: [], respons
       rec.requests.push(body);
       const spec = body.compositeQuery.queries[0].spec;
       const expr: string = spec.filter.expression;
-      const res = signozRaw(newest(evs.filter((e) => !expr || evaluate(expr, signozFields(e))), spec.limit, spec.offset ?? 0));
+      const res = signozRaw(newest(evs.filter((e) => !expr || evaluate(expr, signozFields(e))), spec.limit));
       rec.responses.push(res);
       return res;
     },
