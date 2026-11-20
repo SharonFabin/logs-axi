@@ -195,7 +195,7 @@ export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], res
 }
 
 function signozFields(e: Event): Record<string, unknown> {
-  return { attribute: e.fields, resource: { "service.name": e.service }, log: { body: e.msg, severity_text: e.level.toUpperCase(), trace_id: e.traceId } };
+  return { attribute: e.fields, resource: { "service.name": e.service }, log: { body: e.msg, severity_text: e.level.toUpperCase(), severity_number: SEVERITY[e.level] ?? 9, trace_id: e.traceId } };
 }
 
 export function signozStub(evs: Event[], rec: Recorder = { requests: [], responses: [] }) {

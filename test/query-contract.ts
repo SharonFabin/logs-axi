@@ -64,7 +64,6 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     return lookup(t.value);
   };
   const compare = (): any => {
-    const operand = input[at];
     const left = primary();
     const op = String(input[at]?.value).toLowerCase();
     if (op === "in") {
@@ -81,17 +80,13 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       const right = primary();
       return op === ">=" ? left >= right : left <= right;
     }
-    if (["=", "like", "regexp", "contains"].includes(op)) {
+    if (["=", "like", "ilike", "contains"].includes(op)) {
       at++;
       const right = primary();
       if (op === "=") return left === right;
       const text = String(left ?? "");
-      if (op === "regexp") {
-        const foldBody = operand?.kind === "word" && operand.value === "log.body";
-        const pattern = foldBody ? right.toLowerCase() : right;
-        return new RegExp(pattern.replace("(?i)", ""), pattern.includes("(?i)") ? "i" : "").test(foldBody ? text.toLowerCase() : text);
-      }
-      return op === "contains" ? text.toLowerCase().includes(String(right).toLowerCase())
+      if (op === "ilike") return text.toLowerCase() === String(right).toLowerCase();
+      return op === "contains" ? text.toLowerCase().includes(String(right).replace(/\\([\\%_])/g, "$1").toLowerCase())
         : right instanceof RegExp ? right.test(text)
         : text.includes(right);
     }

@@ -135,6 +135,22 @@ describe("signoz", () => {
     expect(r).toMatchObject({ level: "warn", service: "x", msg: "m", fields: { k: 1 } });
   });
 
+  it.each([
+    [0, "-"], [1, "debug"], [4, "debug"], [5, "debug"], [8, "debug"],
+    [9, "info"], [12, "info"], [13, "warn"], [16, "warn"], [17, "error"],
+    [20, "error"], [21, "fatal"], [24, "fatal"], [25, "-"], [17.5, "-"],
+  ])("normalizes OpenTelemetry severity %s to %s", (severity_number, level) => {
+    expect(szRow({ data: { body: "connection refused", severity_number } }).level).toBe(level);
+  });
+
+  it("uses numeric severity only after explicit text and before inference", () => {
+    expect(szRow({ data: { body: "fatal: failed", severity_number: 9 } }).level).toBe("info");
+    expect(szRow({ data: { body: "fatal: failed", severity_number: 0 } }).level).toBe("fatal");
+    expect(szRow({ data: { body: "failed", severity_number: 17, severity_text: "info" } }).level).toBe("info");
+    expect(szRow({ data: { body: "failed", severity_number: 17, attributes_string: { level: "warn" } } }).level).toBe("warn");
+    expect(szRow({ data: { body: { level: "warn" }, severity_number: 17 } }).level).toBe("warn");
+  });
+
   it("surfaces an API error", async () => {
     const src = signoz({ endpoint: "http://x" }, "t", async () => ({ status: "error", error: { message: "bad filter" } }));
     await expect(src.query({ ...range, limit: 1 })).rejects.toThrow("signoz: error: query failed");

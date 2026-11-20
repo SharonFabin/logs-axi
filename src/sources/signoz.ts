@@ -8,7 +8,7 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { signozKey, validKey } from "../lib/credentials.js";
-import { ID_FIELDS, MAX_SCAN, countServices, isoTime, matchesRecord, parseLine, SAFE_TOKEN, str } from "../core/normalize.js";
+import { ID_FIELDS, INFERRED_LEVEL_WORDS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
@@ -84,14 +84,49 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
   };
 }
 
-/** The v5 filter expression for a LogQuery. Exported for tests. */
-export function buildFilter(q: LogQuery): string {
-  if (!q.text) return "";
-  const text = q.text.replace(/[\\%_]/g, "\\$&").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-  return `log.body CONTAINS '${text}'`;
+const OTEL_SEVERITY_LEVELS = ["debug", "debug", "info", "warn", "error", "fatal"] as const;
+const SEVERITY_FIELDS = ["log.severity_text", "attribute.level", "attribute.severity", "attribute.severity_text"];
+const quote = (text: string) => "'" + text.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+const contains = (text: string) => `log.body CONTAINS ${quote(text.replace(/[\\%_]/g, "\\$&"))}`;
+const any = (terms: string[]) => `(${terms.join(" OR ")})`;
+
+function numberLevel(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) ? OTEL_SEVERITY_LEVELS[Math.floor((value - 1) / 4)] : undefined;
 }
 
-export function rawRequest(q: LogQuery, offset = 0): unknown {
+/** The v5 candidate filter expression for a LogQuery. Exported for tests. */
+export function buildFilter(q: LogQuery): string {
+  const groups: string[] = [];
+  if (q.minLevel) {
+    const levels = levelsAtLeast(q.minLevel);
+    const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
+    const words = new Set(INFERRED_LEVEL_WORDS.flatMap(([level, words]) => levels.includes(level) ? [...words] : []));
+    groups.push(any([
+      `log.severity_number >= ${OTEL_SEVERITY_LEVELS.indexOf(q.minLevel) * 4 + 1}`,
+      ...SEVERITY_FIELDS.flatMap((field) => aliases.map((alias) => `${field} ILIKE ${quote(alias)}`)),
+      ...aliases.filter((alias) => !words.has(alias)).map((alias) => contains(`"${alias}"`)),
+      ...[...words].map(contains),
+    ]));
+  }
+  if (q.service && q.service !== "-") {
+    const names = serviceAliases(q.service);
+    const list = names.map(quote).join(", ");
+    groups.push(any([`resource.service.name IN (${list})`, `attribute.service IN (${list})`, ...names.map((name) => contains(`"${name}"`))]));
+  }
+  if (q.id) {
+    const hex = /^[0-9a-f]{32}$/i.test(q.id);
+    const id = quote(q.id);
+    const matches = ID_FIELDS.map((field) => `attribute.${field} ${hex ? "ILIKE" : "="} ${id}`);
+    if (hex) matches.push(`log.trace_id = ${quote(q.id.toLowerCase())}`);
+    groups.push(any([...matches, contains(q.id)]));
+  }
+  const structured = groups.join(" AND ");
+  if (!q.text) return structured;
+  const text = contains(q.text);
+  return structured ? any([structured, text]) : text;
+}
+
+export function rawRequest(q: LogQuery, offset = 0, expression = buildFilter(q)): unknown {
   return {
     schemaVersion: "v1",
     start: q.start,
@@ -104,7 +139,7 @@ export function rawRequest(q: LogQuery, offset = 0): unknown {
           spec: {
             name: "A",
             signal: "logs",
-            filter: { expression: buildFilter(q) },
+            filter: { expression },
             limit: q.limit,
             offset,
             order: [
@@ -130,6 +165,7 @@ function results(payload: unknown): V5Result[] {
 }
 
 const NOISE = /^(log\.|code\.|telemetry\.|otel\.)/;
+const rawBody = (body: unknown) => body == null ? "" : typeof body === "string" ? body : JSON.stringify(body);
 
 /** One v5 raw row -> a LogRecord. Exported for tests. */
 export function parseRow(row: { timestamp?: unknown; data?: Record<string, unknown> }): LogRecord {
@@ -141,11 +177,10 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
   }
   for (const k of Object.keys(attrs)) if (NOISE.test(k)) delete attrs[k];
   const traceId = typeof d.trace_id === "string" && d.trace_id && !/^0+$/.test(d.trace_id) ? d.trace_id : undefined;
-  const body = typeof d.body === "string" ? d.body : JSON.stringify(d.body ?? "");
-  const rec = parseLine(body, {
+  const rec = parseLine(rawBody(d.body), {
     time: isoTime(row.timestamp ?? d.timestamp) ?? "",
     service: str(resources["service.name"]) ?? str(attrs.service) ?? "-",
-    level: [attrs.level, attrs.severity, attrs.severity_text, d.severity_text].find((v): v is string => typeof v === "string" && v !== ""),
+    level: str(attrs.level) ?? str(attrs.severity) ?? str(attrs.severity_text) ?? str(d.severity_text) ?? numberLevel(d.severity_number),
     ...(traceId ? { traceId } : {}),
   });
   // a JSON body already carried its own fields; attributes add the rest
@@ -183,25 +218,30 @@ class SignozSource implements Source {
     if (q.id && !SAFE_TOKEN.test(q.id)) throw new AxiError(`invalid id \`${q.id}\``, { exitCode: 2 });
     const rows: LogRecord[] = [];
     const seen = new Set<string>();
-    const pageSize = Math.min(1000, q.minLevel || q.service || q.id ? Math.max(100, q.limit) : q.limit);
-    let offset = 0;
-    while (offset < MAX_SCAN) {
-      const limit = Math.min(pageSize, MAX_SCAN - offset);
-      const page = results(await this.request("/api/v5/query_range", rawRequest({ ...q, limit }, offset))).flatMap((result) => result.rows ?? []);
-      offset += page.length;
-      for (const row of page) {
-        const id = str(row.data?.id);
-        if (id) {
-          if (seen.has(id)) continue;
-          seen.add(id);
+    const pageSize = Math.min(1000, q.minLevel || q.service || q.id || q.text ? Math.max(100, q.limit) : q.limit);
+    const text = q.text?.toLowerCase();
+    const candidateFilter = buildFilter(q);
+    for (const expression of candidateFilter ? ["", candidateFilter] : [""]) {
+      let offset = 0;
+      while (offset < MAX_SCAN) {
+        const limit = Math.min(pageSize, MAX_SCAN - offset);
+        const page = results(await this.request("/api/v5/query_range", rawRequest({ ...q, limit }, offset, expression))).flatMap((result) => result.rows ?? []);
+        offset += page.length;
+        for (const row of page) {
+          const id = str(row.data?.id);
+          if (id) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+          }
+          if (text && !rawBody(row.data?.body).toLowerCase().includes(text)) continue;
+          if (q.id && !matchesRowId(row.data ?? {}, q.id)) continue;
+          const record = parseRow(row);
+          if (!matchesRecord(record, q)) continue;
+          rows.push(record);
+          if (rows.length === q.limit) return { rows, partial: expression !== "" };
         }
-        if (q.id && !matchesRowId(row.data ?? {}, q.id)) continue;
-        const record = parseRow(row);
-        if (!matchesRecord(record, q)) continue;
-        rows.push(record);
-        if (rows.length === q.limit) return { rows, partial: false };
+        if (page.length < limit) return { rows, partial: expression !== "" };
       }
-      if (page.length < limit) return { rows, partial: false };
     }
     return { rows, partial: true };
   }
