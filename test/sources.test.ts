@@ -95,6 +95,38 @@ describe("signoz", () => {
     expect(evaluate(buildFilter({ ...range, id: "req-2", limit: 1 }), { log: { body } })).toBe(false);
   });
 
+  it.each([
+    { query: { minLevel: "error" }, body: String.raw`{"msg":"failed:\nexception while opening socket"}`, expected: { level: "error", msg: "failed:\nexception while opening socket" } },
+    { query: { minLevel: "error" }, body: String.raw`{"messa\u0067e":"tr\u0061ceback"}`, expected: { level: "error", msg: "traceback" } },
+    { query: { minLevel: "fatal" }, body: String.raw`{"severity":"\u0063ritical"}`, expected: { level: "fatal" } },
+    { query: { minLevel: "fatal" }, body: String.raw`{"severity_\u0074ext":"cRIT"}`, expected: { level: "fatal" } },
+    { query: { service: "case-service" }, body: String.raw`{"service":"\u0063ase"}`, expected: { service: "case" } },
+    { query: { service: "case" }, body: String.raw`{"ser\u0076ice":"case-service"}`, expected: { service: "case-service" } },
+    { query: { id: "req-1" }, body: String.raw`{"requestId":"req\u002d1"}`, expected: { fields: { requestId: "req-1" } } },
+    { query: { id: "4BF92F3577B34DA6A3CE929D0E0E4736" }, body: String.raw`{"\u0074race_id":"\u0034bf92f3577b34da6a3ce929d0e0e4736"}`, expected: { traceId: "4bf92f3577b34da6a3ce929d0e0e4736" } },
+  ] as const)("finds a decoded match for $body", async ({ query, body, expected }) => {
+    const src = signoz({ endpoint: "http://x" }, "t", async (_path, request: any) => {
+      const { expression } = request.compositeQuery.queries[0].spec.filter;
+      const rows = evaluate(expression, { log: { body } }) ? [{ data: { body } }] : [];
+      return { data: { data: { results: [{ rows }] } } };
+    });
+    const result = await src.query({ ...range, ...query, limit: 1 });
+    expect(result).toMatchObject({ partial: false, rows: [expected] });
+  });
+
+  it.each([
+    { query: { minLevel: "fatal" }, body: '{"Level":"CRIT"}' },
+    { query: { minLevel: "error" }, body: String.raw`{"Message":"failed:\nexception"}` },
+    { query: { service: "case-service" }, body: '{"Service":"case"}' },
+    { query: { service: "case-service" }, body: '{"service":"Case"}' },
+    { query: { id: "req-1" }, body: '{"RequestId":"req-1"}' },
+    { query: { id: "req-1" }, body: '{"requestId":"REQ-1"}' },
+    { query: { id: "4BF92F3577B34DA6A3CE929D0E0E4736" }, body: '{"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"}' },
+  ] as const)("excludes the wrong-case candidate $body", ({ query, body }) => {
+    const filter = buildFilter({ ...range, ...query, limit: 1 });
+    expect(evaluate(filter, { log: { body } })).toBe(false);
+  });
+
   it("labels a SigNoz 500 with its error type and ClickHouse code, never its message", async () => {
     vi.stubEnv("LOGS_AXI_SIGNOZ_KEY", "test-key");
     const payload = { status: "error", error: { type: "internal", code: "unknown", message: "code: 48, message: synthetic-provider-text" } };

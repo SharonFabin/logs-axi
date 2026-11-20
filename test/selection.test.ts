@@ -12,7 +12,15 @@ const row = (body: unknown, index = 0, data: Record<string, unknown> = {}): Row 
 function signozWire(rows: Row[]) {
   const requests: any[] = [];
   const candidateSets = new Map<string, Row[]>();
-  const fields = (r: Row) => ({ attribute: { ...r.data.attributes_string, ...r.data.attributes_number, ...r.data.attributes_bool }, resource: r.data.resources_string ?? {}, log: { body: r.data.body, severity_text: r.data.severity_text, trace_id: r.data.trace_id } });
+  const fields = ({ data }: Row) => ({
+    attribute: { ...data.attributes_string, ...data.attributes_number, ...data.attributes_bool },
+    resource: data.resources_string ?? {},
+    log: {
+      body: typeof data.body === "string" ? data.body : JSON.stringify(data.body),
+      severity_text: data.severity_text,
+      trace_id: data.trace_id,
+    },
+  });
   const transport = async (path: string, request: any) => {
     expect(path).toBe("/api/v5/query_range");
     requests.push(request);

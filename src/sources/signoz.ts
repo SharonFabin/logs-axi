@@ -92,14 +92,22 @@ const LEVEL_FIELDS = ["attribute.level", "attribute.severity", "attribute.severi
 const SERVICE_FILTER_FIELDS = ["resource.service.name", "attribute.service"];
 const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapedJsonString = String.raw`"[^"\\]*\\.(?:[^"\\]|\\.)*"`;
 
 /**
- * `"key": "value"` in the raw body text, case-insensitively. Never `body.<key>`: SigNoz
+ * `"key": "value"` in the raw body text. Never `body.<key>`: SigNoz
  * compiles that to ClickHouse JSON_VALUE, which deployments without JSON functions reject
  * with HTTP 500. A wider match is fine, rows are re-checked by matchesRecord.
  */
-const bodyPair = (keys: readonly string[], values: string[]) =>
-  `log.body REGEXP ${lit(`(?i)"(${keys.join("|")})"\\s*:\\s*"(${values.map(escapeRegex).join("|")})"`)}`;
+const bodyPair = (keys: readonly string[], values?: readonly string[], foldCase = false) => {
+  const key = `(?:"(?:${keys.join("|")})"|${escapedJsonString})`;
+  const choices = values?.map((value) => {
+    const pattern = escapeRegex(value);
+    return foldCase ? pattern.replace(/[a-z]/gi, (letter) => `[${letter.toLowerCase()}${letter.toUpperCase()}]`) : pattern;
+  }).join("|");
+  const value = choices === undefined ? escapedJsonString : `(?:"(?:${choices})"|${escapedJsonString})`;
+  return `log.body REGEXP ${lit(`[{,]\\s*${key}\\s*:\\s*${value}`)}`;
+};
 
 /** The v5 filter expression for a LogQuery. Exported for tests. */
 export function buildFilter(q: LogQuery): string {
@@ -113,7 +121,8 @@ export function buildFilter(q: LogQuery): string {
     const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
     parts.push(any([
       ...LEVEL_FIELDS.map((field) => `${field} REGEXP ${lit("(?i)^(" + aliases.join("|") + ")$")}`),
-      bodyPair(["level", "severity", "severity_text"], aliases),
+      bodyPair(["level", "severity", "severity_text"], aliases, true),
+      bodyPair(["msg", "message"]),
       ...INFERRED_LEVELS.filter(([level]) => levels.includes(level)).map(([, pattern]) => `log.body REGEXP ${lit("(?i)" + pattern)}`),
     ]));
   }
@@ -121,7 +130,7 @@ export function buildFilter(q: LogQuery): string {
   if (q.id) {
     const hex = /^[0-9a-f]{32}$/i.test(q.id);
     const matches = ID_FIELDS.map((field) => hex ? `attribute.${field} REGEXP ${lit("(?i)^" + q.id + "$")}` : `attribute.${field} = ${lit(q.id!)}`);
-    matches.push(bodyPair(ID_FIELDS, [q.id]));
+    matches.push(bodyPair(ID_FIELDS, [q.id], hex));
     if (hex) matches.push(`log.trace_id = ${lit(q.id.toLowerCase())}`);
     parts.push(any(matches));
   }

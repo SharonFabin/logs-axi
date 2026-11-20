@@ -90,9 +90,9 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     if (["=", "like", "regexp", "contains"].includes(op)) {
       at++;
       const right = primary();
-      // text operators see a structured body as its JSON text, as the server does
-      const text = left !== null && typeof left === "object" ? JSON.stringify(left) : String(left ?? "");
-      return op === "=" ? left === right : op === "contains" ? text.toLowerCase().includes(String(right).toLowerCase())
+      if (op === "=") return left === right;
+      const text = String(left ?? "");
+      return op === "contains" ? text.toLowerCase().includes(String(right).toLowerCase())
         : right instanceof RegExp ? right.test(text)
         : op === "regexp" ? new RegExp(right.replace("(?i)", ""), right.includes("(?i)") ? "i" : "").test(text)
         : text.includes(right);
