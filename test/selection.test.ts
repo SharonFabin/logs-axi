@@ -16,7 +16,7 @@ function signozWire(rows: Row[]) {
     attribute: { ...data.attributes_string, ...data.attributes_number, ...data.attributes_bool },
     resource: data.resources_string ?? {},
     log: {
-      body: typeof data.body === "string" ? data.body : JSON.stringify(data.body),
+      body: typeof data.body === "string" ? data.body : data.body?.message,
       severity_text: data.severity_text,
       trace_id: data.trace_id,
     },
@@ -121,7 +121,13 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
     expect((await test.source.query({ ...range, id: "chosen-id", service: "chosen", limit: 1 })).rows).toHaveLength(1);
   });
   it("reports an unfinished scan instead of claiming an empty complete result", async () => {
-    const candidates = Array.from({ length: scanLimit + 1 }, (_, i) => row({ level: i === scanLimit ? "error" : "warn", severity: "error", msg: "Error: bait" }, i));
+    const candidates = Array.from({ length: scanLimit + 1 }, (_, i) => {
+      if (provider === "signoz") {
+        const body = { level: i === scanLimit ? "error" : "info", message: 'completed job "sync"' };
+        return row(body, i, { body });
+      }
+      return row({ level: i === scanLimit ? "error" : "warn", severity: "error", msg: "Error: bait" }, i);
+    });
     const test = create(candidates);
     const result = await test.source.query({ ...range, minLevel: "error", limit: 1 });
     expect(result).toEqual({ rows: [], partial: true });
@@ -156,6 +162,50 @@ it("SigNoz counts normalized body services using only raw requests", async () =>
   const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
   expect(await source.serviceCounts(range)).toEqual({ rows: [{ service: "case", level: "error", count: 1 }, { service: "ehr", level: "error", count: 1 }], partial: false });
   expect(wire.requests).toHaveLength(1);
+});
+
+it.each([
+  { body: { level: "ERROR" }, msg: "connection refused" },
+  { body: { msg: "failed:\nexception while opening socket" }, msg: "failed:\nexception while opening socket" },
+])("SigNoz selects native JSON logs with decoded message $msg", async ({ body, msg }) => {
+  const match = { service: "case-service", requestId: "req-1", message: "connection refused", ...body };
+  const info = { ...match, level: "info", service: "other" };
+  const wire = signozWire([row(info, 0, { body: info }), row(match, 1, { body: match })]);
+  const execute = async (...args: string[]) => {
+    const result = await run(["signoz", "dev", ...args, "--json"], { config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport } });
+    expect(result.code).toBe(0);
+    return JSON.parse(result.out);
+  };
+
+  for (const args of [["errors"], ["errors", "--service", "case"]]) {
+    expect((await execute(...args)).groups).toMatchObject([{ count: 1, service: "case-service", sample: "req-1" }]);
+  }
+  for (const args of [
+    ["search", "--level", "error"],
+    ["search", "CONNECTION", "--level", "error", "--service", "case"],
+    ["search", "--service", "case"],
+    ["trace", "req-1", "--level", "error", "--service", "case"],
+  ]) {
+    expect((await execute(...args)).lines).toMatchObject([{ msg, level: "error", service: "case-service" }]);
+  }
+  expect((await execute("search", "req-1", "--level", "error")).lines).toBe(0);
+});
+
+it("SigNoz trace checks decoded field names and values with exact case", async () => {
+  const body = { service: "case", level: "error", msg: "selected" };
+  const wire = signozWire([
+    row({ ...body, requestId: "REQ-1", msg: "wrong ID case" }, 0),
+    row({ ...body, RequestId: "req-1", msg: "wrong key case" }, 1),
+    row({ ...body, service: "Case", requestId: "req-1", msg: "wrong service case" }, 2),
+    row({ ...body, context: { requestId: "req-1" }, msg: "nested ID" }, 3),
+    row({ ...body, msg: "invalid native ID" }, 4, { trace_id: "req-1" }),
+    row({ ...body, requestId: "req-1" }, 5),
+  ]);
+  const result = await run(["signoz", "dev", "trace", "req-1", "--service", "case", "--json"], {
+    config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport },
+  });
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.out).lines).toMatchObject([{ msg: "selected" }]);
 });
 
 it("CloudWatch trace follows IDs anywhere in the wire line while honoring level and service", async () => {

@@ -37,18 +37,9 @@ export function serviceAliases(name: string): string[] {
 export const ID_FIELDS = ["traceId", "trace_id", "requestId", "correlationId", "caseId", "runId"];
 export const MAX_SCAN = 10000;
 
-export function matchesRecord(record: LogRecord, query: Pick<LogQuery, "minLevel" | "service" | "id">): boolean {
+export function matchesRecord(record: LogRecord, query: Pick<LogQuery, "minLevel" | "service">): boolean {
   if (query.minLevel && !levelsAtLeast(query.minLevel).includes(record.level as Level)) return false;
   if (query.service && !serviceAliases(query.service).includes(record.service)) return false;
-  if (query.id) {
-    const hex = /^[0-9a-f]{32}$/i.test(query.id);
-    const target = hex ? query.id.toLowerCase() : query.id;
-    const sameId = (value: unknown) => {
-      const id = str(value);
-      return id !== undefined && (hex ? id.toLowerCase() : id) === target;
-    };
-    if (!sameId(record.traceId) && !ID_FIELDS.some((key) => sameId(record.fields[key]))) return false;
-  }
   return true;
 }
 

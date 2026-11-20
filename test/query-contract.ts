@@ -31,6 +31,7 @@ function tokens(text: string): Token[] {
 }
 
 export function evaluate(expression: string, fields: Record<string, unknown>): any {
+  if (!expression.trim()) return true;
   const input = tokens(expression);
   let at = 0;
   const is = (word: string) => String(input[at]?.value).toLowerCase() === word;
@@ -43,15 +44,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
   const lookup = (key: string): any => {
     if (Object.hasOwn(fields, key)) return fields[key];
     const [root, ...path] = key.split(".");
-    if (root === "body" && path.length) {
-      let value: any = (fields.log as any)?.body;
-      if (typeof value === "string") {
-        try { value = JSON.parse(value); } catch { return undefined; }
-      }
-      const scalar = read(value, path.join("."));
-      if (scalar === undefined) return undefined;
-      return scalar === null || typeof scalar === "object" ? "" : String(scalar);
-    }
+    if (root === "body" && path.length && Object.hasOwn(fields, "log")) throw new Error("Functions JSON* are not supported");
     if (["attribute", "resource", "log"].includes(root!) && path.length) {
       return read(fields[root!], path.join("."));
     }
@@ -71,6 +64,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     return lookup(t.value);
   };
   const compare = (): any => {
+    const operand = input[at];
     const left = primary();
     const op = String(input[at]?.value).toLowerCase();
     if (op === "in") {
@@ -92,9 +86,13 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       const right = primary();
       if (op === "=") return left === right;
       const text = String(left ?? "");
+      if (op === "regexp") {
+        const foldBody = operand?.kind === "word" && operand.value === "log.body";
+        const pattern = foldBody ? right.toLowerCase() : right;
+        return new RegExp(pattern.replace("(?i)", ""), pattern.includes("(?i)") ? "i" : "").test(foldBody ? text.toLowerCase() : text);
+      }
       return op === "contains" ? text.toLowerCase().includes(String(right).toLowerCase())
         : right instanceof RegExp ? right.test(text)
-        : op === "regexp" ? new RegExp(right.replace("(?i)", ""), right.includes("(?i)") ? "i" : "").test(text)
         : text.includes(right);
     }
     return left;

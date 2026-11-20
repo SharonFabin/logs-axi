@@ -8,7 +8,7 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { signozKey, validKey } from "../lib/credentials.js";
-import { ID_FIELDS, INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
+import { ID_FIELDS, MAX_SCAN, countServices, isoTime, matchesRecord, parseLine, SAFE_TOKEN, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
@@ -84,57 +84,11 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
   };
 }
 
-/** Quote a literal for the v5 filter grammar; LIKE wildcards made literal when `like`. */
-const lit = (s: string, like = false) =>
-  "'" + (like ? s.replace(/[\\%_]/g, "\\$&") : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
-
-const LEVEL_FIELDS = ["attribute.level", "attribute.severity", "attribute.severity_text", "log.severity_text"];
-const SERVICE_FILTER_FIELDS = ["resource.service.name", "attribute.service"];
-const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
-const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const escapedJsonString = String.raw`"[^"\\]*\\.(?:[^"\\]|\\.)*"`;
-
-/**
- * `"key": "value"` in the raw body text. Never `body.<key>`: SigNoz
- * compiles that to ClickHouse JSON_VALUE, which deployments without JSON functions reject
- * with HTTP 500. A wider match is fine, rows are re-checked by matchesRecord.
- */
-const bodyPair = (keys: readonly string[], values?: readonly string[], foldCase = false) => {
-  const key = `(?:"(?:${keys.join("|")})"|${escapedJsonString})`;
-  const choices = values?.map((value) => {
-    const pattern = escapeRegex(value);
-    return foldCase ? pattern.replace(/[a-z]/gi, (letter) => `[${letter.toLowerCase()}${letter.toUpperCase()}]`) : pattern;
-  }).join("|");
-  const value = choices === undefined ? escapedJsonString : `(?:"(?:${choices})"|${escapedJsonString})`;
-  return `log.body REGEXP ${lit(`[{,]\\s*${key}\\s*:\\s*${value}`)}`;
-};
-
 /** The v5 filter expression for a LogQuery. Exported for tests. */
 export function buildFilter(q: LogQuery): string {
-  const parts: string[] = [];
-  if (q.service && q.service !== "-") {
-    const names = serviceAliases(q.service);
-    parts.push(any([...SERVICE_FILTER_FIELDS.map((field) => `${field} IN (${names.map((name) => lit(name)).join(", ")})`), bodyPair(["service"], names)]));
-  }
-  if (q.minLevel && q.minLevel !== "debug") {
-    const levels = levelsAtLeast(q.minLevel);
-    const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
-    parts.push(any([
-      ...LEVEL_FIELDS.map((field) => `${field} REGEXP ${lit("(?i)^(" + aliases.join("|") + ")$")}`),
-      bodyPair(["level", "severity", "severity_text"], aliases, true),
-      bodyPair(["msg", "message"]),
-      ...INFERRED_LEVELS.filter(([level]) => levels.includes(level)).map(([, pattern]) => `log.body REGEXP ${lit("(?i)" + pattern)}`),
-    ]));
-  }
-  if (q.text) parts.push(`log.body CONTAINS ${lit(q.text, true)}`);
-  if (q.id) {
-    const hex = /^[0-9a-f]{32}$/i.test(q.id);
-    const matches = ID_FIELDS.map((field) => hex ? `attribute.${field} REGEXP ${lit("(?i)^" + q.id + "$")}` : `attribute.${field} = ${lit(q.id!)}`);
-    matches.push(bodyPair(ID_FIELDS, [q.id], hex));
-    if (hex) matches.push(`log.trace_id = ${lit(q.id.toLowerCase())}`);
-    parts.push(any(matches));
-  }
-  return parts.join(" AND ");
+  if (!q.text) return "";
+  const text = q.text.replace(/[\\%_]/g, "\\$&").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  return `log.body CONTAINS '${text}'`;
 }
 
 export function rawRequest(q: LogQuery, offset = 0): unknown {
@@ -202,16 +156,23 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
   return { ...rec, fields: { ...attrs, ...rec.fields } };
 }
 
-function rowIds(data: Record<string, unknown>): string[] {
+function matchesRowId(data: Record<string, unknown>, id: string): boolean {
+  const hex = /^[0-9a-f]{32}$/i.test(id);
+  const target = hex ? id.toLowerCase() : id;
+  const matches = (value: unknown) => {
+    const candidate = str(value);
+    return candidate !== undefined && (hex ? candidate.toLowerCase() : candidate) === target;
+  };
+  if (hex && !/^0+$/.test(target) && matches(data.trace_id)) return true;
+
   let body: unknown = data.body;
   if (typeof body === "string") { try { body = JSON.parse(body); } catch {} }
-  const native = str(data.trace_id);
   const fields = [body, ...Object.entries(data).filter(([key]) => /^attributes(_|$)/.test(key)).map(([, value]) => value)];
-  return [native && !/^0+$/.test(native) ? native : undefined, ...fields.flatMap((value) => {
-    if (!value || typeof value !== "object") return [];
+  return fields.some((value) => {
+    if (!value || typeof value !== "object") return false;
     const record = value as Record<string, unknown>;
-    return ID_FIELDS.map((field) => str(record[field]));
-  })].filter((value): value is string => value !== undefined);
+    return ID_FIELDS.some((field) => Object.hasOwn(record, field) && matches(record[field]));
+  });
 }
 
 class SignozSource implements Source {
@@ -234,8 +195,10 @@ class SignozSource implements Source {
           if (seen.has(id)) continue;
           seen.add(id);
         }
+        if (q.id && !matchesRowId(row.data ?? {}, q.id)) continue;
         const record = parseRow(row);
-        if (matchesRecord(record, q) || q.id && rowIds(row.data ?? {}).some((id) => matchesRecord({ ...record, traceId: id }, q))) rows.push(record);
+        if (!matchesRecord(record, q)) continue;
+        rows.push(record);
         if (rows.length === q.limit) return { rows, partial: false };
       }
       if (page.length < limit) return { rows, partial: false };
