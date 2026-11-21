@@ -5,7 +5,7 @@ import { loadConfig } from "../src/lib/config.js";
 import { run } from "../src/cli.js";
 import { maskText, redactObject } from "../src/lib/redact.js";
 import { buildQuery, parseRow as cwRow } from "../src/sources/cloudwatch.js";
-import { buildFilter, signoz, parseRow as szRow } from "../src/sources/signoz.js";
+import { signoz } from "../src/sources/signoz.js";
 import { matchesRecord } from "../src/core/normalize.js";
 import { evaluate, insightsFields } from "./query-contract.js";
 import { NOW, TEST_CONFIG, cloudwatchResults, cloudwatchStub, events, signozStub } from "./fixtures.js";
@@ -168,21 +168,30 @@ const spellings = [
   ["ERR", "error"], ["Error", "error"], ["fatal", "fatal"], ["critical", "fatal"], ["crit", "fatal"], ["panic", "fatal"], ["emergency", "fatal"],
 ] as const;
 
-describe("AWS Insights and SigNoz query contracts with the house severity alias table", () => {
+it.each(spellings)("SigNoz selects and renders native severity text %s as %s", async (severity_text, expected) => {
+  const data = { body: "ordinary request", severity_text };
+  const source = signoz({ endpoint: "http://x" }, "t", async (_path, request: any) => {
+    const { expression } = request.compositeQuery.queries[0].spec.filter;
+    const rows = evaluate(expression, { log: data }) ? [{ data }] : [];
+    return { data: { data: { results: [{ rows }] } } };
+  });
+  for (const minLevel of levels) {
+    const result = await source.query({ ...range, minLevel, limit: 1 });
+    if (levels.indexOf(expected) < levels.indexOf(minLevel)) expect(result.rows).toEqual([]);
+    else expect(result.rows).toMatchObject([{ level: expected, msg: "ordinary request" }]);
+  }
+});
+
+describe("AWS Insights query contract with the house severity alias table", () => {
   for (const [spelling, expected] of spellings) for (const field of ["level", "severity", "severity_text"]) {
     it(`${field}=${spelling} selects and counts as ${expected}`, () => {
       const body = JSON.stringify({ [field]: spelling, msg: "ordinary request" });
       const cwFields = { "@timestamp": NOW - 1000, [field]: spelling, msg: "ordinary request", "@message": body };
-      const szFields = { log: { body, severity_text: "INFO" } };
       expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
-      expect(szRow({ data: { body, severity_text: "INFO" } }).level).toBe(expected);
       for (const minLevel of levels) {
         const selected = levels.indexOf(expected) >= levels.indexOf(minLevel);
         if (selected) expect(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields)).toBeDefined();
         expect(matchesRecord(cwRow([{ field: "@message", value: body }]), { minLevel })).toBe(selected);
-        const filter = buildFilter({ ...range, minLevel, limit: 10 });
-        if (selected) expect(filter ? Boolean(evaluate(filter, szFields)) : true).toBe(true);
-        expect(matchesRecord(szRow({ data: { body, severity_text: "INFO" } }), { minLevel })).toBe(selected);
       }
     });
   }
@@ -193,24 +202,18 @@ describe("AWS Insights and SigNoz query contracts with the house severity alias 
     [{ level: "", msg: "", message: "Error: connection" }, "error"],
   ])("honors field precedence for %j", (fields, expected) => {
     const body = JSON.stringify(fields);
-    const szFields = { body, severity_text: "" };
     expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
-    expect(szRow({ data: szFields }).level).toBe(expected);
   });
   it.each([
     ["Error: connection refused", "error"], ["panic: Error", "fatal"], ["Traceback: failed", "error"],
     ["Warning: slow", "warn"], ["noteworthy request", "-"], ["errorless", "-"], ["{Error: broken", "error"], ['{"error":"failed"}', "error"],
   ])("infers %s consistently as %s", (body, expected) => {
     const cwFields = { "@timestamp": NOW - 1000, "@message": body };
-    const szFields = { log: { body, severity_text: "" } };
     expect(cwRow([{ field: "@message", value: body }]).level).toBe(expected);
-    expect(szRow({ data: szFields.log }).level).toBe(expected);
     for (const minLevel of ["warn", "error", "fatal"] as const) {
       const selected = levels.indexOf(expected as any) >= levels.indexOf(minLevel);
       if (selected) expect(insightsFields(buildQuery({ ...range, minLevel, limit: 10 }), cwFields)).toBeDefined();
       expect(matchesRecord(cwRow([{ field: "@message", value: body }]), { minLevel })).toBe(selected);
-      if (selected) expect(evaluate(buildFilter({ ...range, minLevel, limit: 10 }), szFields)).toBe(true);
-      expect(matchesRecord(szRow({ data: szFields.log }), { minLevel })).toBe(selected);
     }
   });
 });

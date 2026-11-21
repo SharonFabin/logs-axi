@@ -21,7 +21,7 @@ export const LEVEL_ALIASES: Record<string, Level> = {
 export function normalizeLevel(raw: unknown): string {
   if (typeof raw !== "string" || raw === "") return "-";
   const l = raw.toLowerCase();
-  return LEVEL_ALIASES[l] ?? l;
+  return Object.hasOwn(LEVEL_ALIASES, l) ? LEVEL_ALIASES[l]! : l;
 }
 
 /** The levels at or above `min`, e.g. warn -> [warn, error, fatal]. */
@@ -37,18 +37,9 @@ export function serviceAliases(name: string): string[] {
 export const ID_FIELDS = ["traceId", "trace_id", "requestId", "correlationId", "caseId", "runId"];
 export const MAX_SCAN = 10000;
 
-export function matchesRecord(record: LogRecord, query: Pick<LogQuery, "minLevel" | "service" | "id">): boolean {
+export function matchesRecord(record: LogRecord, query: Pick<LogQuery, "minLevel" | "service">): boolean {
   if (query.minLevel && !levelsAtLeast(query.minLevel).includes(record.level as Level)) return false;
   if (query.service && !serviceAliases(query.service).includes(record.service)) return false;
-  if (query.id) {
-    const hex = /^[0-9a-f]{32}$/i.test(query.id);
-    const target = hex ? query.id.toLowerCase() : query.id;
-    const sameId = (value: unknown) => {
-      const id = str(value);
-      return id !== undefined && (hex ? id.toLowerCase() : id) === target;
-    };
-    if (!sameId(record.traceId) && !ID_FIELDS.some((key) => sameId(record.fields[key]))) return false;
-  }
   return true;
 }
 
@@ -68,7 +59,7 @@ const STRUCTURAL = new Set(["time", "timestamp", "@timestamp", "level", "severit
 /**
  * One line of the house JSON log shape `{time, level, service, msg, ...fields}`; a line
  * that is not JSON becomes the message as-is. `fallback.service` is used when the line
- * names none (CloudWatch's stream prefix, SigNoz's resource).
+ * names none (CloudWatch's stream prefix).
  */
 export function parseLine(raw: string, fallback: { time: string; service: string; level?: string; traceId?: string }): LogRecord {
   const trimmed = raw.trim();

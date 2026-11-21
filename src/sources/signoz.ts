@@ -8,7 +8,7 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { signozKey, validKey } from "../lib/credentials.js";
-import { ID_FIELDS, INFERRED_LEVELS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, matchesRecord, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
+import { ID_FIELDS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, normalizeLevel, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
@@ -35,8 +35,13 @@ function validate(raw: Record<string, unknown>, label: string): SignozEnv {
 function providerError(status: number | "error", payload?: unknown, key?: string): AxiError {
   const details = payload as { code?: unknown; type?: unknown; error?: { code?: unknown; type?: unknown } } | undefined;
   const auth = status === 401 || status === 403;
-  const code = !auth && key && [details?.error?.code, details?.error?.type, details?.code, details?.type].find((value): value is string => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value) && !value.includes(key));
-  return new AxiError(`signoz: ${status === "error" ? status : `HTTP ${status}`}: query failed${code ? ` (${code})` : ""}`, {
+  // only fixed-shape tokens, never provider text: a message can quote log rows or the key
+  const safe = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value) && value !== "unknown" && !value.includes(key!);
+  const code = !auth && key ? [details?.error?.code, details?.error?.type, details?.code, details?.type].find(safe) : undefined;
+  const message = (details as { error?: { message?: unknown }; message?: unknown } | undefined)?.error?.message ?? (details as { message?: unknown } | undefined)?.message;
+  const clickhouse = !auth && key && typeof message === "string" ? /^code: (\d{1,4}),/.exec(message)?.[1] : undefined;
+  const reason = [code, clickhouse && !clickhouse.includes(key!) ? `ClickHouse code ${clickhouse}` : undefined].filter(Boolean).join(", ");
+  return new AxiError(`signoz: ${status === "error" ? status : `HTTP ${status}`}: query failed${reason ? ` (${reason})` : ""}`, {
     help: [auth ? "Check your viewer key with `logs-axi signoz login`" : "Check the SigNoz endpoint configuration and query filters"],
   });
 }
@@ -79,36 +84,47 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
   };
 }
 
-/** Quote a literal for the v5 filter grammar; LIKE wildcards made literal when `like`. */
-const lit = (s: string, like = false) =>
-  "'" + (like ? s.replace(/[\\%_]/g, "\\$&") : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
-
-const LEVEL_FIELDS = ["body.level", "body.severity", "body.severity_text", "attribute.level", "attribute.severity", "attribute.severity_text", "log.severity_text"];
-const SERVICE_FILTER_FIELDS = ["body.service", "resource.service.name", "attribute.service"];
-const any = (parts: string[]) => "(" + parts.join(" OR ") + ")";
+const OTEL_SEVERITY_NAMES = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
+const MAX_SEVERITY_NUMBER = OTEL_SEVERITY_NAMES.length * 4;
+const TRACE_ID = /^(?!0{32}$)[0-9a-f]{32}$/i;
+const quote = (text: string) => "'" + text.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+const contains = (text: string) => `log.body CONTAINS ${quote(text.replace(/[\\%_]/g, "\\$&"))}`;
+const any = (terms: string[]) => `(${terms.join(" OR ")})`;
+function numberLevel(value: unknown) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_SEVERITY_NUMBER) return undefined;
+  return OTEL_SEVERITY_NAMES[Math.floor((value - 1) / 4)];
+}
 
 /** The v5 filter expression for a LogQuery. Exported for tests. */
 export function buildFilter(q: LogQuery): string {
-  const parts: string[] = [];
-  if (q.service && q.service !== "-") parts.push(any(SERVICE_FILTER_FIELDS.map((field) => `${field} IN (${serviceAliases(q.service!).map((name) => lit(name)).join(", ")})`)));
-  if (q.minLevel && q.minLevel !== "debug") {
+  const groups: string[] = [];
+  if (q.minLevel) {
     const levels = levelsAtLeast(q.minLevel);
     const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
-    parts.push(any([
-      ...LEVEL_FIELDS.map((field) => `${field} REGEXP ${lit("(?i)^(" + aliases.join("|") + ")$")}`),
-      ...["body.msg", "body.message", "log.body"].flatMap((field) => INFERRED_LEVELS.filter(([level]) => levels.includes(level)).map(([, pattern]) => `${field} REGEXP ${lit("(?i)" + pattern)}`)),
+    const minimum = OTEL_SEVERITY_NAMES.indexOf(q.minLevel === "debug" ? "trace" : q.minLevel) * 4 + 1;
+    const severityText = quote(`(?i)^(?:${aliases.join("|")})$`);
+    groups.push(any([
+      `log.severity_number BETWEEN ${minimum} AND ${MAX_SEVERITY_NUMBER}`,
+      `(log.severity_number NOT BETWEEN 1 AND ${MAX_SEVERITY_NUMBER} AND log.severity_text REGEXP ${severityText})`,
     ]));
   }
-  if (q.text) parts.push(`log.body CONTAINS ${lit(q.text, true)}`);
-  if (q.id) {
-    const matches = ID_FIELDS.flatMap((field) => ["body", "attribute"].map((context) => /^[0-9a-f]{32}$/i.test(q.id!) ? `${context}.${field} REGEXP ${lit("(?i)^" + q.id + "$")}` : `${context}.${field} = ${lit(q.id!)}`));
-    if (/^[0-9a-f]{32}$/i.test(q.id)) matches.push(`log.trace_id = ${lit(q.id.toLowerCase())}`);
-    parts.push(any(matches));
+  if (q.service) {
+    const list = serviceAliases(q.service).map(quote).join(", ");
+    const service = `resource.service.name IN (${list})`;
+    groups.push(q.service === "-" ? any([service, "resource.service.name = ''", "resource.service.name NOT EXISTS"]) : service);
   }
-  return parts.join(" AND ");
+  if (q.id) {
+    const hex = /^[0-9a-f]{32}$/i.test(q.id);
+    const id = quote(q.id);
+    const matches = ID_FIELDS.map((field) => `attribute.${field}:string ${hex ? "ILIKE" : "="} ${id}`);
+    if (TRACE_ID.test(q.id)) matches.push(`log.trace_id = ${quote(q.id.toLowerCase())}`);
+    groups.push(any(matches));
+  }
+  if (q.text) groups.push(contains(q.text));
+  return groups.join(" AND ");
 }
 
-export function rawRequest(q: LogQuery, offset = 0): unknown {
+function rawRequest(q: LogQuery): unknown {
   return {
     schemaVersion: "v1",
     start: q.start,
@@ -123,7 +139,6 @@ export function rawRequest(q: LogQuery, offset = 0): unknown {
             signal: "logs",
             filter: { expression: buildFilter(q) },
             limit: q.limit,
-            offset,
             order: [
               { key: { name: "timestamp" }, direction: "desc" },
               { key: { name: "id" }, direction: "desc" },
@@ -146,43 +161,27 @@ function results(payload: unknown): V5Result[] {
   return p?.data?.data?.results ?? [];
 }
 
-const NOISE = /^(log\.|code\.|telemetry\.|otel\.)/;
+const NOISE = /^(?:(?:log|code|telemetry|otel)\.|(?:service|level|severity|severity_text)$)/;
 
 /** One v5 raw row -> a LogRecord. Exported for tests. */
 export function parseRow(row: { timestamp?: unknown; data?: Record<string, unknown> }): LogRecord {
   const d = row.data ?? {};
-  const resources = { ...(d.resources_string as object), ...(d.resource as object) } as Record<string, unknown>;
-  const attrs: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(d)) {
-    if (/^attributes(_|$)/.test(k) && v && typeof v === "object") Object.assign(attrs, v);
-  }
-  for (const k of Object.keys(attrs)) if (NOISE.test(k)) delete attrs[k];
-  const traceId = typeof d.trace_id === "string" && d.trace_id && !/^0+$/.test(d.trace_id) ? d.trace_id : undefined;
-  const body = typeof d.body === "string" ? d.body : JSON.stringify(d.body ?? "");
-  const rec = parseLine(body, {
+  const resources = d.resources_string as Record<string, unknown> | undefined;
+  const fields: Record<string, unknown> = {
+    ...d.attributes_bool as object,
+    ...d.attributes_number as object,
+    ...d.attributes_string as object,
+  };
+  for (const key of Object.keys(fields)) if (NOISE.test(key)) delete fields[key];
+  const traceId = str(d.trace_id);
+  return {
     time: isoTime(row.timestamp ?? d.timestamp) ?? "",
-    service: str(resources["service.name"]) ?? str(attrs.service) ?? "-",
-    level: [attrs.level, attrs.severity, attrs.severity_text, d.severity_text].find((v): v is string => typeof v === "string" && v !== ""),
-    ...(traceId ? { traceId } : {}),
-  });
-  // a JSON body already carried its own fields; attributes add the rest
-  delete attrs.service;
-  delete attrs.level;
-  delete attrs.severity;
-  delete attrs.severity_text;
-  return { ...rec, fields: { ...attrs, ...rec.fields } };
-}
-
-function rowIds(data: Record<string, unknown>): string[] {
-  let body: unknown = data.body;
-  if (typeof body === "string") { try { body = JSON.parse(body); } catch {} }
-  const native = str(data.trace_id);
-  const fields = [body, ...Object.entries(data).filter(([key]) => /^attributes(_|$)/.test(key)).map(([, value]) => value)];
-  return [native && !/^0+$/.test(native) ? native : undefined, ...fields.flatMap((value) => {
-    if (!value || typeof value !== "object") return [];
-    const record = value as Record<string, unknown>;
-    return ID_FIELDS.map((field) => str(record[field]));
-  })].filter((value): value is string => value !== undefined);
+    service: str(resources?.["service.name"]) ?? "-",
+    level: normalizeLevel(numberLevel(d.severity_number) ?? d.severity_text),
+    msg: typeof d.body === "string" ? d.body : "",
+    ...(traceId && TRACE_ID.test(traceId) ? { traceId } : {}),
+    fields,
+  };
 }
 
 class SignozSource implements Source {
@@ -191,31 +190,13 @@ class SignozSource implements Source {
   async query(q: LogQuery): Promise<QueryResult<LogRecord>> {
     if (q.service && !SAFE_TOKEN.test(q.service)) throw new AxiError(`invalid service name \`${q.service}\``, { exitCode: 2 });
     if (q.id && !SAFE_TOKEN.test(q.id)) throw new AxiError(`invalid id \`${q.id}\``, { exitCode: 2 });
-    const rows: LogRecord[] = [];
-    const seen = new Set<string>();
-    const pageSize = Math.min(1000, q.minLevel || q.service || q.id ? Math.max(100, q.limit) : q.limit);
-    let offset = 0;
-    while (offset < MAX_SCAN) {
-      const limit = Math.min(pageSize, MAX_SCAN - offset);
-      const page = results(await this.request("/api/v5/query_range", rawRequest({ ...q, limit }, offset))).flatMap((result) => result.rows ?? []);
-      offset += page.length;
-      for (const row of page) {
-        const id = str(row.data?.id);
-        if (id) {
-          if (seen.has(id)) continue;
-          seen.add(id);
-        }
-        const record = parseRow(row);
-        if (matchesRecord(record, q) || q.id && rowIds(row.data ?? {}).some((id) => matchesRecord({ ...record, traceId: id }, q))) rows.push(record);
-        if (rows.length === q.limit) return { rows, partial: false };
-      }
-      if (page.length < limit) return { rows, partial: false };
-    }
-    return { rows, partial: true };
+    const payload = await this.request("/api/v5/query_range", rawRequest(q));
+    const rows = results(payload).flatMap((result) => (result.rows ?? []).map(parseRow));
+    return { rows, partial: false };
   }
 
   async serviceCounts(range: TimeRange): Promise<QueryResult<ServiceCount>> {
     const sample = await this.query({ ...range, limit: MAX_SCAN });
-    return { rows: countServices(sample.rows), partial: sample.partial || sample.rows.length >= MAX_SCAN };
+    return { rows: countServices(sample.rows), partial: sample.rows.length >= MAX_SCAN };
   }
 }

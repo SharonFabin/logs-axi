@@ -21,7 +21,7 @@ function tokens(text: string): Token[] {
     } else if (text.startsWith(">=", i) || text.startsWith("<=", i)) { out.push({ kind: "operator", value: text.slice(i, i + 2) }); i += 2; }
     else if (/[(),\[\]=]/.test(c)) { out.push({ kind: c, value: c }); i++; }
     else {
-      const word = /^[\w@.\-]+/.exec(text.slice(i))?.[0];
+      const word = /^[\w@.\-]+(?::string)?/.exec(text.slice(i))?.[0];
       if (!word) throw new Error(`unexpected query token: ${text.slice(i)}`);
       out.push({ kind: /^\d+$/.test(word) ? "literal" : "word", value: /^\d+$/.test(word) ? Number(word) : word });
       i += word.length;
@@ -30,7 +30,26 @@ function tokens(text: string): Token[] {
   return out;
 }
 
+export function signozQueryFields(data: Record<string, unknown>): Record<string, unknown> {
+  return {
+    attribute: { ...data.attributes_bool as object, ...data.attributes_number as object, ...data.attributes_string as object },
+    attributesString: data.attributes_string,
+    resource: data.resources_string,
+    log: data,
+  };
+}
+
+function matchesILike(text: string, pattern: string): boolean {
+  const literal = /[.*+?^${}()|[\]\\]/g;
+  const regex = pattern.replace(/\\([%_\\])|([%_])|[.*+?^${}()|[\]\\]/g, (token, escaped, wildcard) => {
+    if (wildcard) return wildcard === "%" ? ".*" : ".";
+    return (escaped ?? token).replace(literal, "\\$&");
+  });
+  return new RegExp(`^${regex}$`, "isu").test(text);
+}
+
 export function evaluate(expression: string, fields: Record<string, unknown>): any {
+  if (!expression.trim()) return true;
   const input = tokens(expression);
   let at = 0;
   const is = (word: string) => String(input[at]?.value).toLowerCase() === word;
@@ -43,15 +62,8 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
   const lookup = (key: string): any => {
     if (Object.hasOwn(fields, key)) return fields[key];
     const [root, ...path] = key.split(".");
-    if (root === "body" && path.length) {
-      let value: any = (fields.log as any)?.body;
-      if (typeof value === "string") {
-        try { value = JSON.parse(value); } catch { return undefined; }
-      }
-      const scalar = read(value, path.join("."));
-      if (scalar === undefined) return undefined;
-      return scalar === null || typeof scalar === "object" ? "" : String(scalar);
-    }
+    if (root === "body" && path.length && Object.hasOwn(fields, "log")) throw new Error("Functions JSON* are not supported");
+    if (root === "attribute" && key.endsWith(":string")) return read(fields.attributesString, path.join(".").slice(0, -":string".length));
     if (["attribute", "resource", "log"].includes(root!) && path.length) {
       return read(fields[root!], path.join("."));
     }
@@ -71,8 +83,22 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     return lookup(t.value);
   };
   const compare = (): any => {
+    const field = input[at]?.value;
     const left = primary();
     const op = String(input[at]?.value).toLowerCase();
+    if (op === "not" && input[at + 1]?.value.toLowerCase() === "exists") {
+      at += 2;
+      return left == null;
+    }
+    const notBetween = op === "not" && input[at + 1]?.value.toLowerCase() === "between";
+    if (op === "between" || notBetween) {
+      at += notBetween ? 2 : 1;
+      const min = primary();
+      take("and");
+      const max = primary();
+      const within = typeof left === "number" && left >= min && left <= max;
+      return notBetween ? !within : within;
+    }
     if (op === "in") {
       at++;
       const close = is("[") ? "]" : ")";
@@ -87,13 +113,23 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       const right = primary();
       return op === ">=" ? left >= right : left <= right;
     }
-    if (["=", "like", "regexp", "contains"].includes(op)) {
+    if (["=", "like", "ilike", "contains", "regexp"].includes(op)) {
       at++;
       const right = primary();
-      return op === "=" ? left === right : op === "contains" ? String(left ?? "").toLowerCase().includes(String(right).toLowerCase())
-        : right instanceof RegExp ? right.test(String(left ?? ""))
-        : op === "regexp" ? new RegExp(right.replace("(?i)", ""), right.includes("(?i)") ? "i" : "").test(String(left ?? ""))
-        : String(left ?? "").includes(right);
+      if (op === "=") {
+        if (typeof field === "string" && field.startsWith("attribute.") && !field.endsWith(":string") && typeof right === "string" && left != null) {
+          return String(left) === right;
+        }
+        return left === right;
+      }
+      const text = String(left ?? "");
+      if (op === "ilike") return left != null && matchesILike(text, String(right));
+      if (op === "contains") return left != null && matchesILike(text, `%${right}%`);
+      if (op === "regexp") {
+        const ignoreCase = right.startsWith("(?i)");
+        return new RegExp(ignoreCase ? right.slice(4) : right, ignoreCase ? "i" : "").test(text);
+      }
+      return right instanceof RegExp ? right.test(text) : text.includes(right);
     }
     return left;
   };
