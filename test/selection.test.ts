@@ -59,12 +59,14 @@ function cloudwatchWire(rows: Row[], stream = "case/container/task") {
 }
 const config = { region: "us-east-1", logGroups: ["test"] };
 
+function createCloudwatch(rows: Row[]) {
+  const wire = cloudwatchWire(rows);
+  return { ...wire, source: cloudwatch(config, "test", wire.transport) };
+}
+
 describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contract", (provider) => {
   const create = (rows: Row[]) => {
-    if (provider === "cloudwatch") {
-      const wire = cloudwatchWire(rows);
-      return { ...wire, source: cloudwatch(config, "test", wire.transport) };
-    }
+    if (provider === "cloudwatch") return createCloudwatch(rows);
     const wire = signozWire(rows);
     return { ...wire, source: signoz({ endpoint: "http://x" }, "test", wire.transport) };
   };
@@ -87,45 +89,6 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
     expect(test.requests).toHaveLength(1);
     if (provider === "signoz") expect(test.requests[0].requestType).toBe("raw");
   });
-  it.each([50, false, null, "", [], {}])("ignores a non-string/empty level, severity, message or service override: %j", async (invalid) => {
-    if (provider !== "cloudwatch") return;
-    const bodies = [
-      { level: invalid, severity: "ERROR", msg: "request" },
-      { severity: invalid, severity_text: "ERROR", msg: "request" },
-      { severity_text: invalid, msg: "Error: failed" },
-      { msg: invalid, message: "Error: failed" },
-      { message: invalid, error: "Error: failed" },
-    ];
-    for (const body of bodies) {
-      const test = create([row({ ...body, service: invalid }, 0, { resources_string: { "service.name": "case" } })]);
-      const result = await test.source.query({ ...range, minLevel: "error", service: "case", limit: 1 });
-      expect(result.partial).toBe(false);
-      expect(result.rows).toHaveLength(1);
-      expect(result.rows[0]).toMatchObject({ level: "error", service: "case" });
-      expect(await test.source.serviceCounts(range)).toEqual({ rows: [{ level: "error", service: "case", count: 1 }], partial: false });
-    }
-  });
-  it("CloudWatch fills the requested limit after rejecting newer candidate rows", async () => {
-    if (provider !== "cloudwatch") return;
-    const candidates = Array.from({ length: 150 }, (_, i) => row({ level: "warn", severity: "error", msg: "Error: bait", service: "case" }, i));
-    candidates.push(row({ level: 50, severity: "error", msg: "first", service: "case" }, 150), row({ level: false, severity: "error", msg: "second", service: "case" }, 151));
-    const test = create(candidates);
-    const result = await test.source.query({ ...range, minLevel: "error", limit: 2 });
-    expect(result).toMatchObject({ partial: false });
-    expect(result.rows.map((r) => r.msg)).toEqual(["first", "second"]);
-    expect(test.requests[0].limit).toBeGreaterThan(2);
-  });
-  it("CloudWatch reports an unfinished scan instead of claiming an empty complete result", async () => {
-    if (provider !== "cloudwatch") return;
-    const candidates = Array.from({ length: scanLimit + 1 }, (_, i) => row({ level: i === scanLimit ? "error" : "warn", severity: "error", msg: "Error: bait" }, i));
-    const test = create(candidates);
-    const result = await test.source.query({ ...range, minLevel: "error", limit: 1 });
-    expect(result).toEqual({ rows: [], partial: true });
-    const out = await run([provider, "dev", "errors", "--json"], { config: TEST_CONFIG, now: NOW, transports: { [provider]: test.transport } });
-    expect(out.code).toBe(0);
-    expect(JSON.parse(out.out).partial).toBe(true);
-    expect(JSON.parse(out.out).help.join(" ")).toContain("counts may be partial");
-  });
   it("counts normalized records and marks counts as lower bounds after the sample cap", async () => {
     const input = Array.from({ length: scanLimit + 1 }, (_, i) => row({ service: i % 2 ? "case" : "ehr", level: "error", msg: "failed" }, i, { severity_text: "ERROR", resources_string: { "service.name": i % 2 ? "case" : "ehr" } }));
     const test = create(input);
@@ -143,6 +106,45 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
       expect(result.out).not.toMatch(/Jane|jane|A12345|apixaban/);
       expect(result.out).toContain("<search text>");
     }
+  });
+});
+
+describe("cloudwatch candidate selection", () => {
+  it.each([50, false, null, "", [], {}])("ignores a non-string/empty level, severity, message or service override: %j", async (invalid) => {
+    const bodies = [
+      { level: invalid, severity: "ERROR", msg: "request" },
+      { severity: invalid, severity_text: "ERROR", msg: "request" },
+      { severity_text: invalid, msg: "Error: failed" },
+      { msg: invalid, message: "Error: failed" },
+      { message: invalid, error: "Error: failed" },
+    ];
+    for (const body of bodies) {
+      const test = createCloudwatch([row({ ...body, service: invalid })]);
+      const result = await test.source.query({ ...range, minLevel: "error", service: "case", limit: 1 });
+      expect(result.partial).toBe(false);
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0]).toMatchObject({ level: "error", service: "case" });
+      expect(await test.source.serviceCounts(range)).toEqual({ rows: [{ level: "error", service: "case", count: 1 }], partial: false });
+    }
+  });
+  it("fills the requested limit after rejecting newer candidate rows", async () => {
+    const candidates = Array.from({ length: 150 }, (_, i) => row({ level: "warn", severity: "error", msg: "Error: bait", service: "case" }, i));
+    candidates.push(row({ level: 50, severity: "error", msg: "first", service: "case" }, 150), row({ level: false, severity: "error", msg: "second", service: "case" }, 151));
+    const test = createCloudwatch(candidates);
+    const result = await test.source.query({ ...range, minLevel: "error", limit: 2 });
+    expect(result).toMatchObject({ partial: false });
+    expect(result.rows.map((r) => r.msg)).toEqual(["first", "second"]);
+    expect(test.requests[0].limit).toBeGreaterThan(2);
+  });
+  it("reports an unfinished scan instead of claiming an empty complete result", async () => {
+    const candidates = Array.from({ length: scanLimit + 1 }, (_, i) => row({ level: i === scanLimit ? "error" : "warn", severity: "error", msg: "Error: bait" }, i));
+    const test = createCloudwatch(candidates);
+    const result = await test.source.query({ ...range, minLevel: "error", limit: 1 });
+    expect(result).toEqual({ rows: [], partial: true });
+    const out = await run(["cloudwatch", "dev", "errors", "--json"], { config: TEST_CONFIG, now: NOW, transports: { cloudwatch: test.transport } });
+    expect(out.code).toBe(0);
+    expect(JSON.parse(out.out).partial).toBe(true);
+    expect(JSON.parse(out.out).help.join(" ")).toContain("counts may be partial");
   });
 });
 
