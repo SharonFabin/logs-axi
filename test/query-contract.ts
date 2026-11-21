@@ -39,6 +39,15 @@ export function signozQueryFields(data: Record<string, unknown>): Record<string,
   };
 }
 
+function matchesILike(text: string, pattern: string): boolean {
+  const literal = /[.*+?^${}()|[\]\\]/g;
+  const regex = pattern.replace(/\\([%_\\])|([%_])|[.*+?^${}()|[\]\\]/g, (token, escaped, wildcard) => {
+    if (wildcard) return wildcard === "%" ? ".*" : ".";
+    return (escaped ?? token).replace(literal, "\\$&");
+  });
+  return new RegExp(`^${regex}$`, "isu").test(text);
+}
+
 export function evaluate(expression: string, fields: Record<string, unknown>): any {
   if (!expression.trim()) return true;
   const input = tokens(expression);
@@ -114,14 +123,13 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
         return left === right;
       }
       const text = String(left ?? "");
-      if (op === "ilike") return text.toLowerCase() === String(right).toLowerCase();
+      if (op === "ilike") return left != null && matchesILike(text, String(right));
+      if (op === "contains") return left != null && matchesILike(text, `%${right}%`);
       if (op === "regexp") {
         const ignoreCase = right.startsWith("(?i)");
         return new RegExp(ignoreCase ? right.slice(4) : right, ignoreCase ? "i" : "").test(text);
       }
-      return op === "contains" ? text.toLowerCase().includes(String(right).replace(/\\([\\%_])/g, "$1").toLowerCase())
-        : right instanceof RegExp ? right.test(text)
-        : text.includes(right);
+      return right instanceof RegExp ? right.test(text) : text.includes(right);
     }
     return left;
   };

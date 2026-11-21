@@ -101,11 +101,12 @@ also matches `case-service`), `--level <lvl>` (that level and above), `--limit <
 Flags vary by command. Run `logs-axi <source> <env> <command> --help` for its
 supported flags.
 
-CloudWatch `trace` matches the ID anywhere in the raw log line. SigNoz matches
-structured `traceId`, `trace_id`, `requestId`, `correlationId`, `caseId` and `runId`
-values from JSON bodies or attributes, plus native `trace_id` for 32-hex IDs.
-Both sources match 32-hex IDs case-insensitively; other IDs are case-sensitive,
-with substring matching on CloudWatch and exact matching on SigNoz.
+CloudWatch `trace` matches the ID as a substring of the raw log line. SigNoz matches
+exact values in the string attributes `traceId`, `trace_id`, `requestId`,
+`correlationId`, `caseId` and `runId`. It also searches native `trace_id` for
+nonzero 32-digit hexadecimal IDs. Both sources match 32-digit hexadecimal IDs
+case-insensitively. Other IDs are case-sensitive. To find an ID in a SigNoz log
+message, use `logs-axi signoz <env> search <id>`.
 
 Queries scan at most 10,000 candidate rows, with service counts calculated from normalized rows.
 When that cap prevents filling a query, or service counts reach the cap, output includes

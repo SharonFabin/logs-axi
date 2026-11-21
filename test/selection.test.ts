@@ -196,6 +196,9 @@ it.each([
 it.each([
   ['JOB "SYNC"', 'completed job "sync"', "completed job sync"],
   ["job\nsync", "completed job\nsync", "completed job sync"],
+  ["E_CONN", "socket failed with e_conn", "socket failed with EXCONN"],
+  ["50% complete", "upload is 50% complete", "upload is 50 percent complete"],
+  [String.raw`E\_CONN`, String.raw`socket failed with e\_conn`, String.raw`socket failed with E\XCONN`],
 ])("SigNoz matches literal native messages for %j", async (text, message, nearMatch) => {
   const wire = signozWire([row(nearMatch, 0), row(message, 1)]);
   const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
