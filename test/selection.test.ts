@@ -147,23 +147,30 @@ describe.each(["cloudwatch", "signoz"] as const)("%s normalized selection contra
 });
 
 it("SigNoz combines plain message and native metadata predicates", async () => {
-  const match = row("connection refused", 1, { severity_number: 17, resources_string: { "service.name": "case" }, attributes_string: { requestId: "req-1" } });
-  const info = row("connection refused", 0, { severity_number: 9, resources_string: { "service.name": "other" } });
-  const wire = signozWire([info, match]);
+  const metadata = { severity_number: 17, resources_string: { "service.name": "case" }, attributes_string: { requestId: "req-1" } };
+  const wire = signozWire([
+    row("socket closed", 0, metadata),
+    row("connection to other service", 1, { ...metadata, resources_string: { "service.name": "other" } }),
+    row("connection restored", 2, { ...metadata, severity_number: 9 }),
+    row("connection for another request", 3, { ...metadata, attributes_string: { requestId: "req-2" } }),
+    row("connection refused", 4, metadata),
+  ]);
   const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport } };
-  for (const args of [
-    ["search", "CONNECTION", "--level", "error", "--service", "case"],
-    ["search", "--service", "case"],
-    ["trace", "req-1", "--level", "error", "--service", "case"],
+  for (const { args, messages } of [
+    { args: ["search", "CONNECTION"], messages: ["connection refused", "connection for another request"] },
+    { args: ["trace", "req-1"], messages: ["connection refused", "socket closed"] },
   ]) {
-    const result = await run(["signoz", "dev", ...args, "--json"], deps);
+    const result = await run(["signoz", "dev", ...args, "--level", "error", "--service", "case", "--limit", "2", "--json"], deps);
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.out).lines).toMatchObject([{ msg: "connection refused", level: "error", service: "case" }]);
+    expect(JSON.parse(result.out).lines.map(({ msg }: { msg: string }) => msg)).toEqual(messages);
   }
+  const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
+  const combined = await source.query({ ...range, text: "CONNECTION", id: "req-1", minLevel: "error", service: "case", limit: 1 });
+  expect(combined.rows.map(({ msg }) => msg)).toEqual(["connection refused"]);
   const result = await run(["signoz", "dev", "search", "req-1", "--level", "error", "--json"], deps);
   expect(result.code).toBe(0);
   expect(JSON.parse(result.out).lines).toBe(0);
-  expect(wire.pageSizes).toEqual([1, 1, 1, 0]);
+  expect(wire.pageSizes).toEqual([2, 2, 1, 0]);
 });
 
 it.each([
@@ -173,12 +180,8 @@ it.each([
   { query: { id: "ABCDEF0123456789ABCDEF0123456789" }, metadata: { trace_id: "abcdef0123456789abcdef0123456789" } },
   { query: { id: "req-1" }, metadata: { attributes_string: { requestId: "req-1" } } },
   { query: { text: "needle" }, metadata: {} },
-  {
-    query: { text: "needle", minLevel: "error", service: "case", id: "req-1" },
-    metadata: { attributes_string: { requestId: "req-1" }, resources_string: { "service.name": "case" }, severity_text: "Critical" },
-  },
 ] as const)("SigNoz selects an older direct match in the first request for $query", async ({ query, metadata }) => {
-  const noise = `error budget for "case" in req-1 / abcdef0123456789abcdef0123456789${"minLevel" in query ? ": needle" : ""}`;
+  const noise = 'error budget for "case" in req-1 / abcdef0123456789abcdef0123456789';
   const wire = signozWire([
     ...Array.from({ length: scanLimit }, (_, i) => row(noise, i, { severity_number: 9 })),
     row("needle found", scanLimit, metadata),
@@ -188,13 +191,14 @@ it.each([
   expect(wire.pageSizes).toEqual([1]);
 });
 
-it.each(['JOB "SYNC"', "job\nsync"])("SigNoz matches literal native messages for %j", async (text) => {
-  const message = 'completed job "sync" and job\nsync';
-  const wire = signozWire([row(message, 0, { severity_number: 17, resources_string: { "service.name": "case" } })]);
+it.each([
+  ['JOB "SYNC"', 'completed job "sync"', "completed job sync"],
+  ["job\nsync", "completed job\nsync", "completed job sync"],
+])("SigNoz matches literal native messages for %j", async (text, message, nearMatch) => {
+  const wire = signozWire([row(nearMatch, 0), row(message, 1)]);
   const source = signoz({ endpoint: "http://x" }, "test", wire.transport);
   expect(await source.query({ ...range, text, limit: 1 })).toMatchObject({ partial: false, rows: [{ msg: message }] });
   expect(wire.pageSizes).toEqual([1]);
-
 });
 
 it("SigNoz applies the limit to the newest provider matches in one request", async () => {
@@ -234,6 +238,51 @@ it("SigNoz uses numeric severity for CLI filters, grouping, and service counts",
   const services = await run(["signoz", "dev", "services", "--json"], deps);
   expect(services.code).toBe(0);
   expect(JSON.parse(services.out).services).toEqual([{ service: "case", lines: 2, errors: 1, warns: 1 }]);
+});
+
+it("SigNoz uses valid severity numbers before text for selection, display, and counts", async () => {
+  const resource = { resources_string: { "service.name": "case" } };
+  const wire = signozWire([
+    row("mismatched info", 0, { ...resource, severity_number: 9, severity_text: "ERROR" }),
+    row("mismatched error", 1, { ...resource, severity_number: 17, severity_text: "INFO" }),
+    row("labeled critical", 2, { ...resource, severity_number: 18, severity_text: "Critical" }),
+    row("out of range", 3, { ...resource, severity_number: 25, severity_text: "WARN" }),
+    row("unspecified number", 4, { ...resource, severity_number: 0, severity_text: "WARN" }),
+    row("unknown label", 5, { ...resource, severity_number: 0, severity_text: "ERROR2" }),
+  ]);
+  const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport } };
+  const execute = async (...args: string[]) => {
+    const result = await run(["signoz", "dev", ...args, "--json"], deps);
+    expect(result.code).toBe(0);
+    return JSON.parse(result.out);
+  };
+  expect((await execute("search", "--level", "error", "--limit", "2")).lines).toMatchObject([
+    { msg: "labeled critical", level: "error" }, { msg: "mismatched error", level: "error" },
+  ]);
+  expect((await execute("search", "--level", "fatal")).lines).toBe(0);
+  expect((await execute("search", "--level", "warn")).lines).toMatchObject([
+    { msg: "unspecified number", level: "warn" }, { msg: "out of range", level: "warn" },
+    { msg: "labeled critical", level: "error" }, { msg: "mismatched error", level: "error" },
+  ]);
+  expect(await execute("errors", "--service", "case")).toMatchObject({ scanned: 2 });
+  expect((await execute("services")).services).toEqual([{ service: "case", lines: 6, errors: 2, warns: 2 }]);
+});
+
+it("SigNoz excludes attribute copies of service and severity from output context", async () => {
+  const wire = signozWire([row("request", 0, {
+    severity_number: 17,
+    resources_string: { "service.name": "case" },
+    attributes_string: { service: "other", severity_text: "INFO", requestId: "req-1" },
+    attributes_number: { level: 9 },
+    attributes_bool: { severity: false },
+  })]);
+  const deps = { config: TEST_CONFIG, now: NOW, transports: { signoz: wire.transport } };
+  const tail = await run(["signoz", "dev", "tail", "--json"], deps);
+  expect(tail.code).toBe(0);
+  expect(JSON.parse(tail.out).lines).toMatchObject([{ msg: "request", service: "case", level: "error", ctx: "requestId=req-1" }]);
+  const fields = await run(["signoz", "dev", "fields", "--json"], deps);
+  expect(fields.code).toBe(0);
+  expect(JSON.parse(fields.out).fields).toMatchObject([{ field: "requestId", examples: "req-1" }]);
 });
 
 it("SigNoz trace uses exact operational IDs from provider attributes", async () => {

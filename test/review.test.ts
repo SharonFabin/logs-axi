@@ -168,7 +168,7 @@ const spellings = [
   ["ERR", "error"], ["Error", "error"], ["fatal", "fatal"], ["critical", "fatal"], ["crit", "fatal"], ["panic", "fatal"], ["emergency", "fatal"],
 ] as const;
 
-it.each([...spellings, ["ERROR2", "error"], ["FATAL4", "fatal"]] as const)("SigNoz selects and renders native severity text %s as %s", async (severity_text, expected) => {
+it.each(spellings)("SigNoz selects and renders native severity text %s as %s", async (severity_text, expected) => {
   const data = { body: "ordinary request", severity_text };
   const source = signoz({ endpoint: "http://x" }, "t", async (_path, request: any) => {
     const { expression } = request.compositeQuery.queries[0].spec.filter;

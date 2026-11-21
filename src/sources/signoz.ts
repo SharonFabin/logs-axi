@@ -85,10 +85,7 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
 }
 
 const OTEL_SEVERITY_NAMES = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
-const SIGNOZ_LEVEL_ALIASES = new Map([
-  ...Object.entries(LEVEL_ALIASES),
-  ...OTEL_SEVERITY_NAMES.flatMap((name) => [2, 3, 4].map((suffix) => [`${name}${suffix}`, LEVEL_ALIASES[name]!] as const)),
-]);
+const TEXT_LEVEL_ALIASES = new Map(Object.entries(LEVEL_ALIASES));
 const MAX_SEVERITY_NUMBER = OTEL_SEVERITY_NAMES.length * 4;
 const TRACE_ID = /^(?!0{32}$)[0-9a-f]{32}$/i;
 const quote = (text: string) => "'" + text.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
@@ -104,12 +101,12 @@ export function buildFilter(q: LogQuery): string {
   const groups: string[] = [];
   if (q.minLevel) {
     const levels = levelsAtLeast(q.minLevel);
-    const aliases = [...SIGNOZ_LEVEL_ALIASES].filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
+    const aliases = [...TEXT_LEVEL_ALIASES].filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
     const minimum = OTEL_SEVERITY_NAMES.indexOf(q.minLevel === "debug" ? "trace" : q.minLevel) * 4 + 1;
     const severityText = quote(`(?i)^(?:${aliases.join("|")})$`);
     groups.push(any([
-      `log.severity_text REGEXP ${severityText}`,
-      `(log.severity_number >= ${minimum} AND log.severity_number <= ${MAX_SEVERITY_NUMBER})`,
+      `log.severity_number BETWEEN ${minimum} AND ${MAX_SEVERITY_NUMBER}`,
+      `(log.severity_number NOT BETWEEN 1 AND ${MAX_SEVERITY_NUMBER} AND log.severity_text REGEXP ${severityText})`,
     ]));
   }
   if (q.service) {
@@ -165,7 +162,7 @@ function results(payload: unknown): V5Result[] {
   return p?.data?.data?.results ?? [];
 }
 
-const NOISE = /^(log\.|code\.|telemetry\.|otel\.)/;
+const NOISE = /^(?:(?:log|code|telemetry|otel)\.|(?:service|level|severity|severity_text)$)/;
 
 /** One v5 raw row -> a LogRecord. Exported for tests. */
 export function parseRow(row: { timestamp?: unknown; data?: Record<string, unknown> }): LogRecord {
@@ -178,12 +175,11 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
   };
   for (const key of Object.keys(fields)) if (NOISE.test(key)) delete fields[key];
   const traceId = str(d.trace_id);
-  const severityText = str(d.severity_text)?.toLowerCase() ?? "";
-  const severityNumber = numberLevel(d.severity_number);
+  const severity = numberLevel(d.severity_number) ?? str(d.severity_text)?.toLowerCase() ?? "-";
   return {
     time: isoTime(row.timestamp ?? d.timestamp) ?? "",
     service: str(resources?.["service.name"]) ?? "-",
-    level: SIGNOZ_LEVEL_ALIASES.get(severityText) ?? (severityNumber ? LEVEL_ALIASES[severityNumber]! : severityText || "-"),
+    level: TEXT_LEVEL_ALIASES.get(severity) ?? severity,
     msg: typeof d.body === "string" ? d.body : "",
     ...(traceId && TRACE_ID.test(traceId) ? { traceId } : {}),
     fields,

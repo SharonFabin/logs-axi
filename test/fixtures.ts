@@ -105,7 +105,7 @@ export function cloudwatchResults(evs: Event[]) {
   };
 }
 
-const SEVERITY: Record<string, number> = { debug: 5, info: 9, warn: 13, error: 17 };
+const SEVERITY: Record<string, number> = { trace: 1, debug: 5, info: 9, warn: 13, error: 17, fatal: 21 };
 
 function signozAttributes(fields: Record<string, unknown>) {
   const attributes_string: Record<string, string> = {};
@@ -149,7 +149,7 @@ export function signozRaw(evs: Event[]) {
                   },
                   scope_name: "@my-app/observability",
                   scope_version: "",
-                  severity_number: SEVERITY[e.level] ?? 9,
+                  severity_number: SEVERITY[e.level] ?? 0,
                   severity_text: e.level.toUpperCase(),
                   span_id: hex(rng(i + 5), 16),
                   trace_flags: 1,
@@ -204,7 +204,7 @@ function signozFields(e: Event): Record<string, unknown> {
     resources_string: { "service.name": e.service },
     body: e.msg,
     severity_text: e.level.toUpperCase(),
-    severity_number: SEVERITY[e.level] ?? 9,
+    severity_number: SEVERITY[e.level] ?? 0,
     trace_id: e.traceId,
   });
 }

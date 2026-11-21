@@ -107,20 +107,19 @@ describe("signoz", () => {
     expect(szRow({ data: { body: "connection refused", severity_number } }).level).toBe(level);
   });
 
-  it("uses numeric severity when native severity text has no known level", () => {
+  it("uses severity text when the native number is missing or invalid", () => {
     expect(szRow({ data: { body: "fatal: failed", severity_number: 9 } }).level).toBe("info");
     expect(szRow({ data: { body: "fatal: failed", severity_number: 0 } }).level).toBe("-");
-    expect(szRow({ data: { body: "failed", severity_number: 17, severity_text: "info" } }).level).toBe("info");
+    expect(szRow({ data: { body: "failed", severity_number: 17, severity_text: "info" } }).level).toBe("error");
+    expect(szRow({ data: { body: "failed", severity_number: 25, severity_text: "warning" } }).level).toBe("warn");
     expect(szRow({ data: { body: "failed", severity_number: 17, severity_text: "vendor error" } }).level).toBe("error");
     expect(szRow({ data: { body: "failed", severity_number: 17, attributes_string: { level: "warn" } } }).level).toBe("error");
     expect(szRow({ data: { body: { level: "warn" }, severity_number: 17 } })).toMatchObject({ level: "error", msg: "" });
   });
 
-  it.each([
-    ["TRACE4", "debug"], ["DEBUG2", "debug"], ["INFO3", "info"],
-    ["Warn4", "warn"], ["ERROR2", "error"], ["FATAL3", "fatal"],
-  ])("normalizes the OpenTelemetry label %s for display", (severity_text, level) => {
-    expect(szRow({ data: { body: "request", severity_text } }).level).toBe(level);
+  it("preserves an unrecognized severity label when no valid number is present", () => {
+    expect(szRow({ data: { body: "request", severity_text: "ERROR2" } }).level).toBe("error2");
+    expect(szRow({ data: { body: "request", severity_text: "ERROR2", severity_number: 18 } }).level).toBe("error");
   });
 
   it("surfaces an API error", async () => {

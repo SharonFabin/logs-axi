@@ -81,6 +81,15 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
       at += 2;
       return left == null;
     }
+    const notBetween = op === "not" && input[at + 1]?.value.toLowerCase() === "between";
+    if (op === "between" || notBetween) {
+      at += notBetween ? 2 : 1;
+      const min = primary();
+      take("and");
+      const max = primary();
+      const within = typeof left === "number" && left >= min && left <= max;
+      return notBetween ? !within : within;
+    }
     if (op === "in") {
       at++;
       const close = is("[") ? "]" : ")";
