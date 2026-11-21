@@ -8,7 +8,7 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { signozKey, validKey } from "../lib/credentials.js";
-import { ID_FIELDS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
+import { ID_FIELDS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, normalizeLevel, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
@@ -85,7 +85,6 @@ function httpTransport(env: SignozEnv, label: string, envName: string): SignozTr
 }
 
 const OTEL_SEVERITY_NAMES = ["trace", "debug", "info", "warn", "error", "fatal"] as const;
-const TEXT_LEVEL_ALIASES = new Map(Object.entries(LEVEL_ALIASES));
 const MAX_SEVERITY_NUMBER = OTEL_SEVERITY_NAMES.length * 4;
 const TRACE_ID = /^(?!0{32}$)[0-9a-f]{32}$/i;
 const quote = (text: string) => "'" + text.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
@@ -101,7 +100,7 @@ export function buildFilter(q: LogQuery): string {
   const groups: string[] = [];
   if (q.minLevel) {
     const levels = levelsAtLeast(q.minLevel);
-    const aliases = [...TEXT_LEVEL_ALIASES].filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
+    const aliases = Object.entries(LEVEL_ALIASES).filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
     const minimum = OTEL_SEVERITY_NAMES.indexOf(q.minLevel === "debug" ? "trace" : q.minLevel) * 4 + 1;
     const severityText = quote(`(?i)^(?:${aliases.join("|")})$`);
     groups.push(any([
@@ -175,11 +174,10 @@ export function parseRow(row: { timestamp?: unknown; data?: Record<string, unkno
   };
   for (const key of Object.keys(fields)) if (NOISE.test(key)) delete fields[key];
   const traceId = str(d.trace_id);
-  const severity = numberLevel(d.severity_number) ?? str(d.severity_text)?.toLowerCase() ?? "-";
   return {
     time: isoTime(row.timestamp ?? d.timestamp) ?? "",
     service: str(resources?.["service.name"]) ?? "-",
-    level: TEXT_LEVEL_ALIASES.get(severity) ?? severity,
+    level: normalizeLevel(numberLevel(d.severity_number) ?? d.severity_text),
     msg: typeof d.body === "string" ? d.body : "",
     ...(traceId && TRACE_ID.test(traceId) ? { traceId } : {}),
     fields,

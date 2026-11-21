@@ -21,7 +21,7 @@ export const LEVEL_ALIASES: Record<string, Level> = {
 export function normalizeLevel(raw: unknown): string {
   if (typeof raw !== "string" || raw === "") return "-";
   const l = raw.toLowerCase();
-  return LEVEL_ALIASES[l] ?? l;
+  return Object.hasOwn(LEVEL_ALIASES, l) ? LEVEL_ALIASES[l]! : l;
 }
 
 /** The levels at or above `min`, e.g. warn -> [warn, error, fatal]. */

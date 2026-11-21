@@ -7,6 +7,11 @@ import { events, signozRaw } from "./fixtures.js";
 
 const range = { start: 1_000_000, end: 2_000_000 };
 
+it("preserves unknown severity labels that name inherited properties", () => {
+  expect(cwRow([{ field: "@message", value: '{"level":"CONSTRUCTOR"}' }]).level).toBe("constructor");
+  expect(szRow({ data: { severity_text: "CONSTRUCTOR" } }).level).toBe("constructor");
+});
+
 describe("cloudwatch", () => {
   it("builds an Insights query from the shared filters", () => {
     const q = buildQuery({ ...range, service: "case", minLevel: "error", text: "pay.er", id: "abc-123", limit: 50 });
