@@ -74,13 +74,8 @@ Credential updates replace the file atomically, preserving existing keys if writ
 the replacement fails. If the file contains invalid JSON, login replaces it with only
 the newly entered key; run login again for any other environment or default keys.
 
-**Live status (v1):** the CloudWatch adapter is verified read-only against dev and prod.
-The SigNoz adapter is untested against a live server, pending a viewer API key: its
-request and response shapes follow SigNoz's v5 `query_range` contract (as used by the
-official SigNoz MCP server) and are covered by recorded-shape tests only (a live dev
-server answers 401 to an invalid key, as expected). To try it: make the endpoint
-reachable (see above), run `logs-axi signoz login --env dev` with a viewer key, then
-`logs-axi signoz dev services`.
+The SigNoz adapter uses the read-only v5 `query_range` API. After configuring the
+endpoint and viewer key, run `logs-axi signoz dev services` to check access.
 
 ## Commands
 
@@ -101,6 +96,15 @@ also matches `case-service`), `--level <lvl>` (that level and above), `--limit <
 Flags vary by command. Run `logs-axi <source> <env> <command> --help` for its
 supported flags.
 
+SigNoz uses the resource's `service.name` for labels, filters, and counts. Empty
+and missing names appear as `-` and match `--service -`. Severity comes from the
+native `severity_number` when it is an integer from 1 to 24 and falls back to
+`severity_text` otherwise. OpenTelemetry TRACE maps to `debug`.
+
+SigNoz uses the string body as the message, including JSON text. Non-string bodies
+produce an empty message. Error templates use that message, and `fields` samples
+log attributes.
+
 CloudWatch `trace` matches the ID as a substring of the raw log line. SigNoz matches
 exact values in the string attributes `traceId`, `trace_id`, `requestId`,
 `correlationId`, `caseId` and `runId`. It also searches native `trace_id` for
@@ -108,14 +112,17 @@ nonzero 32-digit hexadecimal IDs. Both sources match 32-digit hexadecimal IDs
 case-insensitively. Other IDs are case-sensitive. To find an ID in a SigNoz log
 message, use `logs-axi signoz <env> search <id>`.
 
-Queries scan at most 10,000 candidate rows, with service counts calculated from normalized rows.
-When that cap prevents filling a query, or service counts reach the cap, output includes
-`partial: true` and a warning that counts are lower bounds. Separately, `errors` warns
-when its 1000-line sample fills. Narrow `--since` to improve coverage. Redacted search
-hints use a placeholder for the search text.
+SigNoz applies filters on the server before limiting results. CloudWatch can
+inspect up to 10,000 candidate rows and reports `partial: true` if it hits that
+cap before filling the requested result. On both sources, `services` counts up
+to 10,000 normalized rows and reports `partial: true` when that sample fills.
+The accompanying warning marks counts as lower bounds. The `errors` command
+also warns when its 1000-line sample fills. Narrow `--since` to improve coverage.
+Redacted search hints use a placeholder for the search text.
 
 Exit codes: 0 success (empty results included), 1 error, 2 usage error. Errors print to
-stdout as `error:` plus help lines that say how to fix them.
+stdout as `error:` plus help lines that say how to fix them. SigNoz query failures
+may include a provider error identifier or a numeric ClickHouse error code.
 
 ## Redaction
 
@@ -142,33 +149,16 @@ known gap.
 
 ## Bench
 
-`npm run bench` compares output tokens for the same queries: the raw API response (what
-an SDK call, curl or the SigNoz MCP returns) against logs-axi's output. Offline, on a
-synthetic 2000-line corpus through recorded-shape stubs; tokens via o200k_base as a
-stand-in for Claude's tokenizer.
-
-| query | source | raw API tokens | logs-axi tokens | smaller by |
-|---|---|---:|---:|---:|
-| tail (50 lines) | cloudwatch | 13,003 | 5,137 | 2.5x |
-| tail (50 lines) | signoz | 13,840 | 6,250 | 2.2x |
-| search text+level | cloudwatch | 10,841 | 3,142 | 3.5x |
-| search text+level | signoz | 11,683 | 4,271 | 2.7x |
-| errors (grouped) | cloudwatch | 96,064 | 473 | 203.1x |
-| errors (grouped) | signoz | 104,078 | 451 | 230.8x |
-| trace one id | cloudwatch | 307 | 98 | 3.1x |
-| trace one id | signoz | 302 | 98 | 3.1x |
-| services | cloudwatch | 339 | 107 | 3.2x |
-| services | signoz | 181 | 107 | 1.7x |
-| fields | cloudwatch | 51,468 | 600 | 85.8x |
-| fields | signoz | 54,988 | 600 | 91.6x |
-| **total** | | **357,094** | **21,334** | **16.7x** |
+`npm run bench` prints per-command token counts and totals for raw API responses
+and logs-axi output. It runs offline with synthetic logs and stub transports and
+uses o200k_base as a stand-in for Claude's tokenizer.
 
 ## Adding a source
 
 Write `src/sources/<name>.ts` exporting a `SourceFactory` (`src/core/types.ts`): validate
-its env config, implement `query(LogQuery)` and `serviceCounts(range)`, normalize rows
-with `parseLine`. Register it with one line in `src/sources/index.ts`. Every command,
-redaction, templating and output format then works for it unchanged.
+its env config, implement `query(LogQuery)` and `serviceCounts(range)`, and normalize
+provider rows to `LogRecord`. Register it with one line in `src/sources/index.ts`. Every
+command, redaction, templating and output format then works for it unchanged.
 
 ## Development
 
