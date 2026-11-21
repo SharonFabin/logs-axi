@@ -66,39 +66,10 @@ describe("cloudwatch", () => {
 });
 
 describe("signoz", () => {
-  const sourceForBody = (body: string) => signoz({ endpoint: "http://x" }, "t", async (_path, request: any) => {
-    const { expression } = request.compositeQuery.queries[0].spec.filter;
-    const rows = evaluate(expression, { log: { body } }) ? [{ data: { body } }] : [];
-    return { data: { data: { results: [{ rows }] } } };
-  });
-
   it("sends literal body text to SigNoz for case-insensitive search", () => {
     const filter = buildFilter({ ...range, text: "Body.Level", limit: 1 });
     expect(evaluate(filter, { log: { body: "the body.level value is missing" } })).toBe(true);
     expect(evaluate(filter, { log: { body: "the bodyXlevel value is missing" } })).toBe(false);
-  });
-
-  it.each([
-    { query: { minLevel: "error" }, body: String.raw`{"msg":"failed:\nexception while opening socket"}`, expected: { level: "error", msg: "failed:\nexception while opening socket" } },
-    { query: { minLevel: "error" }, body: String.raw`{"messa\u0067e":"tr\u0061ceback"}`, expected: { level: "error", msg: "traceback" } },
-    { query: { minLevel: "fatal" }, body: String.raw`{"severity":"\u0063ritical"}`, expected: { level: "fatal" } },
-    { query: { minLevel: "fatal" }, body: String.raw`{"severity_\u0074ext":"cRIT"}`, expected: { level: "fatal" } },
-    { query: { service: "case-service" }, body: String.raw`{"service":"\u0063ase"}`, expected: { service: "case" } },
-    { query: { service: "case" }, body: String.raw`{"ser\u0076ice":"case-service"}`, expected: { service: "case-service" } },
-    { query: { id: "req-1" }, body: String.raw`{"requestId":"req\u002d1"}`, expected: { fields: { requestId: "req-1" } } },
-    { query: { id: "4BF92F3577B34DA6A3CE929D0E0E4736" }, body: String.raw`{"\u0074race_id":"\u0034bf92f3577b34da6a3ce929d0e0e4736"}`, expected: { traceId: "4bf92f3577b34da6a3ce929d0e0e4736" } },
-  ] as const)("finds a decoded match for $body", async ({ query, body, expected }) => {
-    const result = await sourceForBody(body).query({ ...range, ...query, limit: 1 });
-    expect(result).toMatchObject({ partial: false, rows: [expected] });
-  });
-
-  it.each([
-    { query: { minLevel: "error" }, body: String.raw`{"level":"info","msg":"completed job \"sync\""}` },
-    { query: { minLevel: "error" }, body: '{"level":"info","msg":"error budget"}' },
-    { query: { service: "case" }, body: '{"relatedService":"case"}' },
-    { query: { id: "req-1" }, body: '{"residentId":"req-1"}' },
-  ] as const)("excludes unrelated string-body text $body", async ({ query, body }) => {
-    expect(await sourceForBody(body).query({ ...range, ...query, limit: 1 })).toEqual({ rows: [], partial: false });
   });
 
   it("labels a SigNoz 500 with its error type and ClickHouse code, never its message", async () => {
@@ -122,9 +93,10 @@ describe("signoz", () => {
     expect(Object.keys(r.fields)).not.toContain("telemetry.sdk.name");
   });
 
-  it("parses a JSON body like a CloudWatch line", () => {
-    const r = szRow({ timestamp: "2026-11-16T14:00:00Z", data: { body: '{"level":"warn","service":"x","msg":"m","k":1}', resources_string: { "service.name": "x" } } });
-    expect(r).toMatchObject({ level: "warn", service: "x", msg: "m", fields: { k: 1 } });
+  it("renders a JSON-looking message verbatim using native metadata", () => {
+    const body = '{"level":"warn","service":"other","msg":"m","requestId":"body-id"}';
+    const result = szRow({ timestamp: "2026-11-16T14:00:00Z", data: { body, resources_string: { "service.name": "case" } } });
+    expect(result).toEqual({ time: "2026-11-16T14:00:00.000Z", level: "-", service: "case", msg: body, fields: {} });
   });
 
   it.each([
@@ -135,12 +107,13 @@ describe("signoz", () => {
     expect(szRow({ data: { body: "connection refused", severity_number } }).level).toBe(level);
   });
 
-  it("uses numeric severity only after explicit text and before inference", () => {
+  it("uses numeric severity when native severity text has no known level", () => {
     expect(szRow({ data: { body: "fatal: failed", severity_number: 9 } }).level).toBe("info");
-    expect(szRow({ data: { body: "fatal: failed", severity_number: 0 } }).level).toBe("fatal");
+    expect(szRow({ data: { body: "fatal: failed", severity_number: 0 } }).level).toBe("-");
     expect(szRow({ data: { body: "failed", severity_number: 17, severity_text: "info" } }).level).toBe("info");
-    expect(szRow({ data: { body: "failed", severity_number: 17, attributes_string: { level: "warn" } } }).level).toBe("warn");
-    expect(szRow({ data: { body: { level: "warn" }, severity_number: 17 } }).level).toBe("warn");
+    expect(szRow({ data: { body: "failed", severity_number: 17, severity_text: "vendor error" } }).level).toBe("error");
+    expect(szRow({ data: { body: "failed", severity_number: 17, attributes_string: { level: "warn" } } }).level).toBe("error");
+    expect(szRow({ data: { body: { level: "warn" }, severity_number: 17 } })).toMatchObject({ level: "error", msg: "" });
   });
 
   it.each([

@@ -21,13 +21,22 @@ function tokens(text: string): Token[] {
     } else if (text.startsWith(">=", i) || text.startsWith("<=", i)) { out.push({ kind: "operator", value: text.slice(i, i + 2) }); i += 2; }
     else if (/[(),\[\]=]/.test(c)) { out.push({ kind: c, value: c }); i++; }
     else {
-      const word = /^[\w@.\-]+/.exec(text.slice(i))?.[0];
+      const word = /^[\w@.\-]+(?::string)?/.exec(text.slice(i))?.[0];
       if (!word) throw new Error(`unexpected query token: ${text.slice(i)}`);
       out.push({ kind: /^\d+$/.test(word) ? "literal" : "word", value: /^\d+$/.test(word) ? Number(word) : word });
       i += word.length;
     }
   }
   return out;
+}
+
+export function signozQueryFields(data: Record<string, unknown>): Record<string, unknown> {
+  return {
+    attribute: { ...data.attributes_bool as object, ...data.attributes_number as object, ...data.attributes_string as object },
+    attributesString: data.attributes_string,
+    resource: data.resources_string,
+    log: data,
+  };
 }
 
 export function evaluate(expression: string, fields: Record<string, unknown>): any {
@@ -45,6 +54,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     if (Object.hasOwn(fields, key)) return fields[key];
     const [root, ...path] = key.split(".");
     if (root === "body" && path.length && Object.hasOwn(fields, "log")) throw new Error("Functions JSON* are not supported");
+    if (root === "attribute" && key.endsWith(":string")) return read(fields.attributesString, path.join(".").slice(0, -":string".length));
     if (["attribute", "resource", "log"].includes(root!) && path.length) {
       return read(fields[root!], path.join("."));
     }
@@ -67,6 +77,10 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     const field = input[at]?.value;
     const left = primary();
     const op = String(input[at]?.value).toLowerCase();
+    if (op === "not" && input[at + 1]?.value.toLowerCase() === "exists") {
+      at += 2;
+      return left == null;
+    }
     if (op === "in") {
       at++;
       const close = is("[") ? "]" : ")";
@@ -84,14 +98,17 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     if (["=", "like", "ilike", "contains", "regexp"].includes(op)) {
       at++;
       const right = primary();
-      if (op === "=") return left === right;
+      if (op === "=") {
+        if (typeof field === "string" && field.startsWith("attribute.") && !field.endsWith(":string") && typeof right === "string" && left != null) {
+          return String(left) === right;
+        }
+        return left === right;
+      }
       const text = String(left ?? "");
       if (op === "ilike") return text.toLowerCase() === String(right).toLowerCase();
       if (op === "regexp") {
-        const foldBody = field === "log.body";
-        const pattern = foldBody ? right.toLowerCase() : right;
-        const ignoreCase = pattern.startsWith("(?i)");
-        return new RegExp(ignoreCase ? pattern.slice(4) : pattern, ignoreCase ? "i" : "").test(foldBody ? text.toLowerCase() : text);
+        const ignoreCase = right.startsWith("(?i)");
+        return new RegExp(ignoreCase ? right.slice(4) : right, ignoreCase ? "i" : "").test(text);
       }
       return op === "contains" ? text.toLowerCase().includes(String(right).replace(/\\([\\%_])/g, "$1").toLowerCase())
         : right instanceof RegExp ? right.test(text)
@@ -99,12 +116,7 @@ export function evaluate(expression: string, fields: Record<string, unknown>): a
     }
     return left;
   };
-  const unary = (): any => {
-    if (!is("not")) return compare();
-    at++;
-    return !unary();
-  };
-  const and = (): any => { let value = unary(); while (is("and")) { at++; const right = unary(); value = value && right; } return value; };
+  const and = (): any => { let value = compare(); while (is("and")) { at++; const right = compare(); value = value && right; } return value; };
   const or = (): any => { let value = and(); while (is("or")) { at++; const right = and(); value = value || right; } return value; };
   const value = or();
   if (at !== input.length) throw new Error(`unconsumed query: ${input.slice(at).map((t) => t.value).join(" ")}`);

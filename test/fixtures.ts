@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { evaluate, insightsFields } from "./query-contract.js";
+import { evaluate, insightsFields, signozQueryFields } from "./query-contract.js";
 /**
  * Synthetic log events and the raw API responses each source would return for them.
  * Everything here is invented: no real log content, names or ids. The people below
@@ -107,6 +107,18 @@ export function cloudwatchResults(evs: Event[]) {
 
 const SEVERITY: Record<string, number> = { debug: 5, info: 9, warn: 13, error: 17 };
 
+function signozAttributes(fields: Record<string, unknown>) {
+  const attributes_string: Record<string, string> = {};
+  const attributes_number: Record<string, number> = {};
+  const attributes_bool: Record<string, boolean> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (typeof value === "number") attributes_number[key] = value;
+    else if (typeof value === "boolean") attributes_bool[key] = value;
+    else if (value !== undefined) attributes_string[key] = typeof value === "string" ? value : JSON.stringify(value);
+  }
+  return { attributes_string, attributes_number, attributes_bool };
+}
+
 /** SigNoz v5 query_range raw response, the shape the OTel log bridge produces. */
 export function signozRaw(evs: Event[]) {
   const sorted = [...evs].sort((a, b) => (a.time < b.time ? 1 : -1));
@@ -120,18 +132,10 @@ export function signozRaw(evs: Event[]) {
             queryName: "A",
             nextCursor: "",
             rows: sorted.map((e, i) => {
-              const strings: Record<string, string> = {};
-              const numbers: Record<string, number> = {};
-              for (const [k, v] of Object.entries(e.fields)) {
-                if (typeof v === "number") numbers[k] = v;
-                else if (v !== undefined) strings[k] = typeof v === "string" ? v : JSON.stringify(v);
-              }
               return {
                 timestamp: e.time,
                 data: {
-                  attributes_bool: {},
-                  attributes_number: numbers,
-                  attributes_string: strings,
+                  ...signozAttributes(e.fields),
                   body: e.msg,
                   id: createHash("sha256").update(JSON.stringify(e)).digest("hex").slice(0, 27),
                   resources_string: {
@@ -195,7 +199,14 @@ export function cloudwatchStub(evs: Event[], rec: Recorder = { requests: [], res
 }
 
 function signozFields(e: Event): Record<string, unknown> {
-  return { attribute: e.fields, resource: { "service.name": e.service }, log: { body: e.msg, severity_text: e.level.toUpperCase(), severity_number: SEVERITY[e.level] ?? 9, trace_id: e.traceId } };
+  return signozQueryFields({
+    ...signozAttributes(e.fields),
+    resources_string: { "service.name": e.service },
+    body: e.msg,
+    severity_text: e.level.toUpperCase(),
+    severity_number: SEVERITY[e.level] ?? 9,
+    trace_id: e.traceId,
+  });
 }
 
 export function signozStub(evs: Event[], rec: Recorder = { requests: [], responses: [] }) {

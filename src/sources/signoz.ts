@@ -8,7 +8,7 @@
  */
 import { AxiError } from "../lib/errors.js";
 import { signozKey, validKey } from "../lib/credentials.js";
-import { ID_FIELDS, INFERRED_LEVEL_WORDS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, parseLine, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
+import { ID_FIELDS, LEVEL_ALIASES, MAX_SCAN, countServices, isoTime, levelsAtLeast, SAFE_TOKEN, serviceAliases, str } from "../core/normalize.js";
 import type { LogQuery, LogRecord, QueryResult, ServiceCount, Source, SourceFactory, TimeRange } from "../core/types.js";
 
 export interface SignozEnv {
@@ -89,32 +89,14 @@ const SIGNOZ_LEVEL_ALIASES = new Map([
   ...Object.entries(LEVEL_ALIASES),
   ...OTEL_SEVERITY_NAMES.flatMap((name) => [2, 3, 4].map((suffix) => [`${name}${suffix}`, LEVEL_ALIASES[name]!] as const)),
 ]);
-const SEVERITY_FIELDS = ["log.severity_text", "attribute.level", "attribute.severity", "attribute.severity_text"];
-const BODY_LEVEL_KEYS = ["level", "severity", "severity_text"];
+const MAX_SEVERITY_NUMBER = OTEL_SEVERITY_NAMES.length * 4;
+const TRACE_ID = /^(?!0{32}$)[0-9a-f]{32}$/i;
 const quote = (text: string) => "'" + text.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
 const contains = (text: string) => `log.body CONTAINS ${quote(text.replace(/[\\%_]/g, "\\$&"))}`;
 const any = (terms: string[]) => `(${terms.join(" OR ")})`;
-const regexp = (field: string, pattern: string) => `${field} REGEXP ${quote(pattern)}`;
-const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-function jsonLiteral(value: string, foldCase = false): string {
-  return [...value].map((letter) => {
-    const forms = foldCase ? new Set([letter.toLowerCase(), letter.toUpperCase()]) : [letter];
-    const alternatives = [...forms].flatMap((char) => {
-      const hex = char.charCodeAt(0).toString(16).padStart(4, "0").replace(/[a-f]/g, (digit) => `[${digit}${digit.toUpperCase()}]`);
-      return [escapeRegex(char), String.raw`\\u${hex}`];
-    });
-    return `(?:${alternatives.join("|")})`;
-  }).join("");
-}
-
-function bodyPair(keys: readonly string[], valuePattern: string): string {
-  const keyPattern = keys.map((key) => jsonLiteral(key)).join("|");
-  return regexp("log.body", String.raw`[{,]\s*"(?:${keyPattern})"\s*:\s*"(?:${valuePattern})"`);
-}
-
 function numberLevel(value: unknown) {
-  return typeof value === "number" && Number.isInteger(value) ? OTEL_SEVERITY_NAMES[Math.floor((value - 1) / 4)] : undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_SEVERITY_NUMBER) return undefined;
+  return OTEL_SEVERITY_NAMES[Math.floor((value - 1) / 4)];
 }
 
 /** The v5 filter expression for a LogQuery. Exported for tests. */
@@ -124,39 +106,22 @@ export function buildFilter(q: LogQuery): string {
     const levels = levelsAtLeast(q.minLevel);
     const aliases = [...SIGNOZ_LEVEL_ALIASES].filter(([, level]) => levels.includes(level)).map(([alias]) => alias);
     const minimum = OTEL_SEVERITY_NAMES.indexOf(q.minLevel === "debug" ? "trace" : q.minLevel) * 4 + 1;
-    const matches = [
-      `log.severity_number >= ${minimum}`,
-      ...SEVERITY_FIELDS.map((field) => regexp(field, `(?i)^(?:${aliases.join("|")})$`)),
-      bodyPair(BODY_LEVEL_KEYS, aliases.map((alias) => jsonLiteral(alias, true)).join("|")),
-    ];
-    const words = INFERRED_LEVEL_WORDS.flatMap(([level, words]) => levels.includes(level) ? [...words] : []);
-    if (words.length) {
-      const boundary = String.raw`(?:\b|\\[bfnrt]|\\u00(?:[01][0-9a-f]|20))`;
-      const inferred = regexp("log.body", `${boundary}(?:${words.map((word) => jsonLiteral(word, true)).join("|")})\\b`);
-      const explicit = any([
-        "log.severity_number >= 1",
-        ...SEVERITY_FIELDS.map((field) => regexp(field, ".+")),
-        bodyPair(BODY_LEVEL_KEYS, String.raw`(?:[^"\\]|\\.)+`),
-      ]);
-      matches.push(`(${inferred} AND NOT ${explicit})`);
-    }
-    groups.push(any(matches));
+    const severityText = quote(`(?i)^(?:${aliases.join("|")})$`);
+    groups.push(any([
+      `log.severity_text REGEXP ${severityText}`,
+      `(log.severity_number >= ${minimum} AND log.severity_number <= ${MAX_SEVERITY_NUMBER})`,
+    ]));
   }
   if (q.service) {
-    const names = serviceAliases(q.service);
-    const list = names.map(quote).join(", ");
-    const matches = [`resource.service.name IN (${list})`, `attribute.service IN (${list})`, bodyPair(["service"], names.map((name) => jsonLiteral(name)).join("|"))];
-    if (q.service === "-") matches.push(`NOT ${any([
-      regexp("resource.service.name", ".+"), regexp("attribute.service", ".+"), bodyPair(["service"], String.raw`(?:[^"\\]|\\.)+`),
-    ])}`);
-    groups.push(any(matches));
+    const list = serviceAliases(q.service).map(quote).join(", ");
+    const service = `resource.service.name IN (${list})`;
+    groups.push(q.service === "-" ? any([service, "resource.service.name = ''", "resource.service.name NOT EXISTS"]) : service);
   }
   if (q.id) {
     const hex = /^[0-9a-f]{32}$/i.test(q.id);
     const id = quote(q.id);
-    const matches = ID_FIELDS.map((field) => `attribute.${field} ${hex ? "ILIKE" : "="} ${id}`);
-    if (hex) matches.push(`log.trace_id = ${quote(q.id.toLowerCase())}`);
-    matches.push(bodyPair(ID_FIELDS, jsonLiteral(q.id, hex)));
+    const matches = ID_FIELDS.map((field) => `attribute.${field}:string ${hex ? "ILIKE" : "="} ${id}`);
+    if (TRACE_ID.test(q.id)) matches.push(`log.trace_id = ${quote(q.id.toLowerCase())}`);
     groups.push(any(matches));
   }
   if (q.text) groups.push(contains(q.text));
@@ -201,30 +166,28 @@ function results(payload: unknown): V5Result[] {
 }
 
 const NOISE = /^(log\.|code\.|telemetry\.|otel\.)/;
-const rawBody = (body: unknown) => body == null ? "" : typeof body === "string" ? body : JSON.stringify(body);
 
 /** One v5 raw row -> a LogRecord. Exported for tests. */
 export function parseRow(row: { timestamp?: unknown; data?: Record<string, unknown> }): LogRecord {
   const d = row.data ?? {};
-  const resources = { ...(d.resources_string as object), ...(d.resource as object) } as Record<string, unknown>;
-  const attrs: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(d)) {
-    if (/^attributes(_|$)/.test(k) && v && typeof v === "object") Object.assign(attrs, v);
-  }
-  for (const k of Object.keys(attrs)) if (NOISE.test(k)) delete attrs[k];
-  const traceId = typeof d.trace_id === "string" && d.trace_id && !/^0+$/.test(d.trace_id) ? d.trace_id : undefined;
-  const rec = parseLine(rawBody(d.body), {
+  const resources = d.resources_string as Record<string, unknown> | undefined;
+  const fields: Record<string, unknown> = {
+    ...d.attributes_bool as object,
+    ...d.attributes_number as object,
+    ...d.attributes_string as object,
+  };
+  for (const key of Object.keys(fields)) if (NOISE.test(key)) delete fields[key];
+  const traceId = str(d.trace_id);
+  const severityText = str(d.severity_text)?.toLowerCase() ?? "";
+  const severityNumber = numberLevel(d.severity_number);
+  return {
     time: isoTime(row.timestamp ?? d.timestamp) ?? "",
-    service: str(resources["service.name"]) ?? str(attrs.service) ?? "-",
-    level: str(attrs.level) ?? str(attrs.severity) ?? str(attrs.severity_text) ?? str(d.severity_text) ?? numberLevel(d.severity_number),
-    ...(traceId ? { traceId } : {}),
-  });
-  // a JSON body already carried its own fields; attributes add the rest
-  delete attrs.service;
-  delete attrs.level;
-  delete attrs.severity;
-  delete attrs.severity_text;
-  return { ...rec, level: SIGNOZ_LEVEL_ALIASES.get(rec.level) ?? rec.level, fields: { ...attrs, ...rec.fields } };
+    service: str(resources?.["service.name"]) ?? "-",
+    level: SIGNOZ_LEVEL_ALIASES.get(severityText) ?? (severityNumber ? LEVEL_ALIASES[severityNumber]! : severityText || "-"),
+    msg: typeof d.body === "string" ? d.body : "",
+    ...(traceId && TRACE_ID.test(traceId) ? { traceId } : {}),
+    fields,
+  };
 }
 
 class SignozSource implements Source {
