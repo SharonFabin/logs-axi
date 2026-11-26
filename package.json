@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Agent-ergonomic, token-efficient log CLI over CloudWatch, SigNoz and future sources (read-only, redacted by default)",
   "type": "module",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SharonFabin/logs-axi.git"
