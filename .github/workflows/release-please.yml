@@ -28,6 +28,11 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           cache: npm
 
+      # `npm stage` needs npm >= 11.18; pin one that has it so an older cached
+      # Node 24 on the runner cannot fall back to an npm without it.
+      - run: npm install -g npm@11.19.1
+        if: ${{ steps.release.outputs.release_created }}
+
       - run: npm ci
         if: ${{ steps.release.outputs.release_created }}
 
@@ -37,5 +42,7 @@ jobs:
       - run: npm run build
         if: ${{ steps.release.outputs.release_created }}
 
-      - run: npm publish --access public --provenance
+      # Staged, not published: the trusted publisher only allows `npm stage publish`,
+      # so the version goes live only after a maintainer approves it with 2FA on npmjs.com.
+      - run: npm stage publish --access public --provenance
         if: ${{ steps.release.outputs.release_created }}
