@@ -28,7 +28,7 @@ help[2]:
 ## Install and configure
 
 ```bash
-npm install -g github:SharonFabin/logs-axi
+npm install -g github:SharonFabin/logs-axi#release   # prebuilt by CI, no build step
 config_file="${LOGS_AXI_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/logs-axi/config.json}"
 mkdir -p "$(dirname "$config_file")" && cp "$(npm root -g)/logs-axi/config.example.json" "$config_file"
 logs-axi signoz login   # SigNoz viewer key: hidden prompt, stored per user
@@ -163,7 +163,8 @@ command, redaction, templating and output format then works for it unchanged.
 ## Development
 
 ```bash
-npm install
+npm install       # also builds dist/ via prepare
+npm link          # optional: put this checkout's logs-axi on PATH
 npm test          # vitest; synthetic fixtures only, no network
 npm run typecheck
 npm run bench
