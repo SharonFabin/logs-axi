@@ -28,7 +28,7 @@ help[2]:
 ## Install and configure
 
 ```bash
-npm install -g github:SharonFabin/logs-axi
+npm install -g logs-axi   # or run without installing: npx -y logs-axi
 config_file="${LOGS_AXI_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/logs-axi/config.json}"
 mkdir -p "$(dirname "$config_file")" && cp "$(npm root -g)/logs-axi/config.example.json" "$config_file"
 logs-axi signoz login   # SigNoz viewer key: hidden prompt, stored per user

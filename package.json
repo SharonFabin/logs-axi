@@ -3,25 +3,41 @@
   "version": "0.1.0",
   "description": "Agent-ergonomic, token-efficient log CLI over CloudWatch, SigNoz and future sources (read-only, redacted by default)",
   "type": "module",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SharonFabin/logs-axi.git"
+  },
+  "keywords": [
+    "logs",
+    "cli",
+    "agent",
+    "axi",
+    "toon",
+    "cloudwatch",
+    "signoz"
+  ],
   "bin": {
     "logs-axi": "dist/index.js"
   },
   "files": [
     "dist",
-    "skills",
-    "config.example.json"
+    "skills/logs-axi",
+    "config.example.json",
+    "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm run build",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "bench": "tsx bench/tokens.ts"
+    "bench": "tsx bench/tokens.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch-logs": "^3.1169.0",
