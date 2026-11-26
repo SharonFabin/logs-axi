@@ -28,12 +28,15 @@ help[2]:
 ## Install and configure
 
 ```bash
-npm install -g github:SharonFabin/logs-axi
+npm install -g logs-axi   # the config copy below reads the example from this global install
 config_file="${LOGS_AXI_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/logs-axi/config.json}"
 mkdir -p "$(dirname "$config_file")" && cp "$(npm root -g)/logs-axi/config.example.json" "$config_file"
 logs-axi signoz login   # SigNoz viewer key: hidden prompt, stored per user
 logs-axi                # shows what is configured
 ```
+
+To run without a global install, use `npx -y logs-axi ...`; copy `config.example.json`
+from this repository instead of `$(npm root -g)`.
 
 The config (`$LOGS_AXI_CONFIG` when nonempty, else `$XDG_CONFIG_HOME/logs-axi/config.json`
 when `XDG_CONFIG_HOME` is nonempty, else `~/.config/logs-axi/config.json`) maps

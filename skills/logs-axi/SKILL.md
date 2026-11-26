@@ -25,7 +25,7 @@ followed by `help[N]:` lines with the next commands to run.
 
 ## Setup
 
-- Install: `npm install -g github:SharonFabin/logs-axi`.
+- Install: `npm install -g logs-axi` (or run `npx -y logs-axi ...` without installing).
 - Config: follow [Install and configure](../../README.md#install-and-configure) for file locations and setup.
 - CloudWatch uses the AWS profile in the config; if it errors on credentials, run
   `aws sso login --profile <the profile in the config>`.
