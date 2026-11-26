@@ -174,3 +174,11 @@ npm run dev -- cloudwatch dev errors
 ```
 
 Agents: see `skills/logs-axi/SKILL.md`.
+
+## Releasing
+
+release-please opens a release PR from conventional commits; merging it tags the release
+and the workflow stages the package with `npm stage publish` (OIDC trusted publishing,
+provenance, no npm token). A staged version is not installable until a maintainer approves
+it with 2FA on npmjs.com (or `npm stage approve <stage-id>`); until then the release is
+tagged on GitHub but not on npm. To drop a bad staged version, run `npm stage reject <stage-id>`.
