@@ -1,6 +1,6 @@
 {
   "name": "logs-axi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agent-ergonomic, token-efficient log CLI over CloudWatch, SigNoz and future sources (read-only, redacted by default)",
   "type": "module",
   "repository": {
