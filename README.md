@@ -182,6 +182,10 @@ and the workflow publishes the package with `npm publish` (OIDC trusted publishi
 provenance, no npm token). Merging the release PR is the approval: there is no separate
 2FA step on npmjs.com.
 
+If the release SHA check fails, confirm the version is absent from npm. Delete the
+GitHub release and its tag, replace `autorelease: tagged` with `autorelease: pending`
+on the merged release PR, and re-run the workflow for the release commit.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
