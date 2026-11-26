@@ -182,9 +182,17 @@ and the workflow publishes the package with `npm publish` (OIDC trusted publishi
 provenance, no npm token). Merging the release PR is the approval: there is no separate
 2FA step on npmjs.com.
 
-If the release SHA check fails, confirm the version is absent from npm. Delete the
-GitHub release and its tag, replace `autorelease: tagged` with `autorelease: pending`
-on the merged release PR, and re-run the workflow for the release commit.
+If the release SHA check fails, use the release SHA in the error to find the
+original `release-please` run in GitHub Actions.
+
+1. Pause merges and pushes to `main` and all other `release-please` reruns. Wait
+   for all queued and in-progress `release-please` runs to finish.
+2. Confirm the original run can still be rerun and the version is absent from
+   npm. See the [GitHub Actions rerun rules](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
+3. Delete the GitHub release and its tag, then replace `autorelease: tagged`
+   with `autorelease: pending` on the merged release PR.
+4. Rerun the workflow for the release commit. Confirm the version is available
+   on npm before resuming pushes, merges, or other release reruns.
 
 ## License
 
