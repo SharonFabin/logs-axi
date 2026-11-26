@@ -2,6 +2,8 @@ name: release
 
 # Builds the package and force-pushes the result to the `release` branch, so
 # `npm install -g github:SharonFabin/logs-axi#release` needs no build step.
+# The build job runs npm with a read-only token; the publish job has the write
+# token and runs only git on the downloaded build output.
 
 on:
   push:
@@ -9,22 +11,26 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: true
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm run build
       - name: Assemble release tree
@@ -39,8 +45,24 @@ jobs:
             delete p.devDependencies;
             fs.writeFileSync(process.argv[1], JSON.stringify(p, null, 2) + "\n");
           ' "$RUNNER_TEMP/release/package.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-tree
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-tree
+          path: release
       - name: Push release branch
-        working-directory: ${{ runner.temp }}/release
+        working-directory: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
