@@ -177,11 +177,29 @@ Agents: see `skills/logs-axi/SKILL.md`. Contributing: see [CONTRIBUTING.md](CONT
 
 ## Releasing
 
-release-please opens a release PR from conventional commits; merging it tags the release
-and the workflow stages the package with `npm stage publish` (OIDC trusted publishing,
-provenance, no npm token). A staged version is not installable until a maintainer approves
-it with 2FA on npmjs.com (or `npm stage approve <stage-id>`); until then the release is
-tagged on GitHub but not on npm. To drop a bad staged version, run `npm stage reject <stage-id>`.
+release-please opens a release PR from conventional commits. Merging the PR is
+the approval to publish. The workflow on `main` tags the release, then checks
+that the run was triggered by the release commit before building or publishing.
+It runs `npm publish` with OIDC trusted publishing and provenance, without an npm
+token or a separate 2FA approval on npmjs.com.
+
+If the release SHA check fails, use the SHA in the error to find the
+`release-please` run triggered by the push at the release commit.
+
+1. Pause merges and pushes to `main` and all other `release-please` reruns. Wait
+   for all queued and in-progress `release-please` runs to finish.
+2. Before resetting the release, confirm all of the following. Stop if any check
+   fails.
+
+   - The original run can still be rerun. See the [GitHub Actions rerun rules](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
+   - The workflow at the release commit uses `npm publish` directly.
+   - The release version is absent from npm and no higher stable,
+     non-deprecated version is published there.
+
+3. Delete the GitHub release and its tag, then replace `autorelease: tagged`
+   with `autorelease: pending` on the merged release PR.
+4. Rerun the workflow for the release commit. Confirm the version is available
+   on npm before resuming pushes, merges, or other release reruns.
 
 ## License
 
