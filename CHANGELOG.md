@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/SharonFabin/logs-axi/compare/logs-axi-v0.1.1...logs-axi-v0.1.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* publish npm releases without manual 2FA approval ([#9](https://github.com/SharonFabin/logs-axi/issues/9)) ([6401824](https://github.com/SharonFabin/logs-axi/commit/640182413a91fdc40807496a008eec59876bb842))
+
 ## [0.1.1](https://github.com/SharonFabin/logs-axi/compare/logs-axi-v0.1.0...logs-axi-v0.1.1) (2026-11-26)
 
 
