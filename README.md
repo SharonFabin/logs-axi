@@ -177,13 +177,14 @@ Agents: see `skills/logs-axi/SKILL.md`. Contributing: see [CONTRIBUTING.md](CONT
 
 ## Releasing
 
-release-please opens a release PR from conventional commits; merging it tags the release
-and the workflow publishes the package with `npm publish` (OIDC trusted publishing,
-provenance, no npm token). Merging the release PR is the approval: there is no separate
-2FA step on npmjs.com.
+release-please opens a release PR from conventional commits. Merging the PR is
+the approval to publish. The workflow on `main` tags the release, then checks
+that the run was triggered by the release commit before building or publishing.
+It runs `npm publish` with OIDC trusted publishing and provenance, without an npm
+token or a separate 2FA approval on npmjs.com.
 
-If the release SHA check fails, use the release SHA in the error to find the
-original `release-please` run in GitHub Actions.
+If the release SHA check fails, use the SHA in the error to find the
+`release-please` run triggered by the push at the release commit.
 
 1. Pause merges and pushes to `main` and all other `release-please` reruns. Wait
    for all queued and in-progress `release-please` runs to finish.
